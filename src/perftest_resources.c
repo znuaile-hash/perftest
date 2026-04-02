@@ -5160,6 +5160,9 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 
 	/* main loop for posting */
 	while (1) {
+		/* 建链不发包 */
+		sleep(1000);
+		continue;
 	/* main loop to run over all the qps and post each time n messages */
 		for (index = 0 ; index < num_of_qps ; index++) {
 
