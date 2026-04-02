@@ -325,7 +325,8 @@ struct pingpong_context {
 	int					*current_remote_recv_offset;
 	uint64_t				tail_markers_offset;    /* Offset to tail markers (64-byte aligned) */
 	uint64_t				recv_slots_offset;      /* Offset to recv slots (64-byte aligned) */
-	uint64_t				atomic_returns_offset;  /* Offset to atomic return values area (64-byte aligned) */
+		uint64_t				atomic_returns_offset;  /* Offset to atomic return values area (64-byte aligned) */
+	void					**user_data;           /* User data for deep mode */
 };
 
  struct pingpong_dest {
@@ -539,7 +540,7 @@ int set_valid_dek(char *dst, struct perftest_parameters *user_param);
  * Return Value : Adress of the new QP.
  */
 struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
-			struct perftest_parameters *user_param, int qp_index);
+			struct perftest_parameters *user_param, int qp_index, void *user_data);
 
 /* ctx_modify_qp_to_init.
  *

@@ -3056,7 +3056,9 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 			#ifdef HAVE_SIG_OFFLOAD
 			{.name = "sig_offload", .has_arg = 0, .flag = &sig_offload_flag, .val = 1 },
 			#endif
-			{.name = "data_validation", .has_arg = 0, .flag = &data_validation_flag, .val = 1 },
+			{.name = "exp", .has_arg = 1, .flag = NULL, .val = 1},
+				{.name = "deep", .has_arg = 0, .flag = NULL, .val = 2},
+				{.name = "data_validation", .has_arg = 0, .flag = &data_validation_flag, .val = 1 },
 			{.name = "data_validation_debug", .has_arg = 0, .flag = &data_validation_debug_flag, .val = 1 },
 			{0}
 		};
@@ -3065,7 +3067,7 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 			ALLOCATE(duplicates_checker, int, size_long_options);
 			memset(duplicates_checker, 0, size_long_options * sizeof(int));
 		}
-		c = getopt_long(argc,argv,"w:y:p:d:i:m:s:n:t:u:S:x:c:q:I:o:M:r:Q:A:l:D:f:B:T:L:E:J:j:K:k:X:W:aFegzRvhbNVCHUOZP",long_options, &long_option_index);
+		c = getopt_long(argc,argv,"w:y:p:d:i:m:s:n:t:u:S:x:c:q:I:o:M:r:Q:A:l:D:f:B:T:L:E:J:j:K:k:X:W:aFegzRvhbNVCHUOZP12",long_options, &long_option_index);
 
 		/* c == 0: the argumenet is a long option (example: --report_gbits) */
 		/* c > 0: the argument is a short option (example: -s/--size) */
@@ -3339,6 +3341,17 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 					  return FAILURE;
 				  }
 				  break;
+			case '1':  /* --exp option */
+				CHECK_VALUE(user_param->expid, int, "expid", not_int_ptr);
+				if (user_param->expid < 0) {
+					fprintf(stderr, " expid must be non-negative\n");
+					free(duplicates_checker);
+					return FAILURE;
+				}
+				break;
+			case '2':  /* --deep option */
+				user_param->deep = 1;
+				break;
 			case 'P': user_param->machine = CLIENT; break;
 			case 'Z': user_param->machine = SERVER; break;
 			case 'v': user_param->mac_fwd = ON; break;
@@ -3917,6 +3930,19 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 	if (data_validation_flag) {
 		user_param->data_validation = 1;
 		data_validation_flag = 0;
+	}
+
+	/* Handle new custom flags */
+	if (long_option_index == 30) {  /* --exp option */
+		CHECK_VALUE(user_param->expid, int, "expid", not_int_ptr);
+		if (user_param->expid < 0) {
+			fprintf(stderr, " expid must be non-negative\n");
+			free(duplicates_checker);
+			return FAILURE;
+		}
+	}
+	if (long_option_index == 31) {  /* --deep option */
+		user_param->deep = 1;
 	}
 
 	if (data_validation_debug_flag) {

@@ -705,6 +705,8 @@ struct perftest_parameters {
 	int				validation_chunks_per_qp; /* Dynamic buffer depth */
 	uint32_t			validation_chunk_size;    /* Operations per validation chunk (may differ from tx_depth) */
 	enum validation_mode		validation_mode;
+	int expid;
+	int deep;
 };
 
 struct report_options {

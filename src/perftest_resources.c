@@ -1204,6 +1204,8 @@ int alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_para
 	#endif
 	ALLOC(ctx->mr, struct ibv_mr*, user_param->num_of_qps);
 	ALLOC(ctx->buf, void*, user_param->num_of_qps);
+	ALLOC(ctx->user_data, void*, user_param->num_of_qps);
+	memset(ctx->user_data, 0, user_param->num_of_qps * sizeof(void*));
 
 	if ((user_param->tst == BW || user_param->tst == LAT_BY_BW) && (user_param->machine == CLIENT || user_param->duplex)) {
 
@@ -1364,6 +1366,8 @@ void dealloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_p
 		free(ctx->mr);
 	if (ctx->buf != NULL)
 		free(ctx->buf);
+	if (ctx->user_data != NULL)
+		free(ctx->user_data);
 	if ((user_param->tst == BW || user_param->tst == LAT_BY_BW) && (user_param->machine == CLIENT || user_param->duplex)) {
 		if (ctx->my_addr != NULL)
 			free(ctx->my_addr);
@@ -1496,6 +1500,10 @@ int destroy_ctx(struct pingpong_context *ctx,
 					test_result = 1;
 				}
 				ctx->qp[i] = NULL;
+				if (ctx->user_data && ctx->user_data[i]) {
+					free(ctx->user_data[i]);
+					ctx->user_data[i] = NULL;
+				}
 			}
 		}
 	}
@@ -2892,7 +2900,24 @@ int create_reg_qp_main(struct pingpong_context *ctx,
 		ctx->qp[i] = ctx_xrc_qp_create(ctx, user_param, i);
 		#endif
 	} else {
-		ctx->qp[i] = ctx_qp_create(ctx, user_param, i);
+		void *user_data = NULL;
+	if (user_param->deep) {
+		int *data = malloc(sizeof(int));
+		if (!data) {
+			fprintf(stderr, "Failed to allocate memory for user_data\n");
+			return FAILURE;
+		}
+		*data = user_param->expid + i;
+		user_data = data;
+	}
+
+	ctx->qp[i] = ctx_qp_create(ctx, user_param, i, user_data);
+
+	if (user_param->deep && user_data) {
+		ctx->user_data[i] = user_data;
+	} else {
+		ctx->user_data[i] = NULL;
+	}
 	}
 
 	if (ctx->qp[i] == NULL) {
@@ -2933,7 +2958,7 @@ int create_qp_main(struct pingpong_context *ctx,
 }
 
 struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
-		struct perftest_parameters *user_param, int qp_index)
+		struct perftest_parameters *user_param, int qp_index, void *user_data)
 {
 	struct ibv_qp* qp = NULL;
 	int dc_num_of_qps = user_param->num_of_qps / 2;
