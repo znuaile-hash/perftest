@@ -2992,6 +2992,13 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 	attr.send_cq = ctx->send_cq;
 	attr.recv_cq = has_recv_comp(user_param->verb) ? ctx->recv_cq : ctx->send_cq;
 
+	/* Set user context if in deep mode */
+	if (user_param->deep && user_data) {
+		attr.qp_context = user_data;
+	} else {
+		attr.qp_context = NULL;
+	}
+
 	is_dc_server_side = ((!(user_param->duplex || user_param->tst == LAT) &&
 						  (user_param->machine == SERVER)) ||
 						 ((user_param->duplex || user_param->tst == LAT) &&
