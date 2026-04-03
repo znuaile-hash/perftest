@@ -3086,10 +3086,9 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 	attr_ex.cap.max_inline_data = attr.cap.max_inline_data;
 	attr_ex.cap.max_recv_wr  = attr.cap.max_recv_wr;
 	attr_ex.cap.max_recv_sge = attr.cap.max_recv_sge;
+	/* Set qp_context for deep mode */
+	attr_ex.qp_context = attr.qp_context;
 	#endif
-
-	/* Copy qp_context to attr_ex.base for QP creation */
-	attr_ex.base.qp_context = attr.qp_context;
 
 	if (user_param->work_rdma_cm) {
 		#ifdef HAVE_IBV_WR_API
