@@ -3088,6 +3088,9 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 	attr_ex.cap.max_recv_sge = attr.cap.max_recv_sge;
 	#endif
 
+	/* Copy qp_context to attr_ex.base for QP creation */
+	attr_ex.base.qp_context = attr.qp_context;
+
 	if (user_param->work_rdma_cm) {
 		#ifdef HAVE_IBV_WR_API
 		if (!user_param->use_old_post_send)
