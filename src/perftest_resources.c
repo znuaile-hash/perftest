@@ -3226,10 +3226,12 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 			}
 			else
 			#endif //HAVE_HNSDV
+				printf("Using standard QP ex creation ibv_create_qp_ex attr_ex.qp_context: %p\n", attr_ex.qp_context);
 				qp = ibv_create_qp_ex(ctx->context, &attr_ex);
 		}
 		else
 		#endif // HAVE_IBV_WR_API
+			printf("Using standard QP creation ibv_create_qp attr.qp_context: %p\n", attr.qp_context);
 			qp = ibv_create_qp(ctx->pd, &attr);
 	}
 
