@@ -3234,7 +3234,10 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 		else
 		#endif // HAVE_IBV_WR_API
 		{
-			printf("Using standard QP creation ibv_create_qp attr.qp_context: %p\n", attr.qp_context);
+			/* Standard RDMA devices (including Huawei hinic) do not support qp_context */
+			if (user_param->deep) {
+				printf("Warning: --deep/--exp is not supported on standard RDMA devices (including Huawei hinic)\n");
+			}
 			qp = ibv_create_qp(ctx->pd, &attr);
 		}
 	}
@@ -5201,8 +5204,11 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 	/* main loop for posting */
 	while (1) {
 		/* 建链不发包 */
-		sleep(1000);
-		continue;
+		if(user_param->deep){
+			sleep(1000);
+			continue;
+		}
+		
 	/* main loop to run over all the qps and post each time n messages */
 		for (index = 0 ; index < num_of_qps ; index++) {
 
