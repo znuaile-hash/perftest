@@ -1368,6 +1368,8 @@ void dealloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_p
 		free(ctx->buf);
 	if (ctx->user_data != NULL)
 		free(ctx->user_data);
+	if (ctx->comm_matrix != NULL)
+		free(ctx->comm_matrix);
 	if ((user_param->tst == BW || user_param->tst == LAT_BY_BW) && (user_param->machine == CLIENT || user_param->duplex)) {
 		if (ctx->my_addr != NULL)
 			free(ctx->my_addr);
@@ -5201,14 +5203,39 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 
 	user_param->tposted[0] = get_cycles();
 
+	/* In deep mode, QP 0 sends one packet carrying the communication matrix, then sleeps */
+	if (user_param->deep && ctx->comm_matrix != NULL && ctx->comm_matrix_size > 0) {
+		uint32_t matrix_bytes = ctx->comm_matrix_size * sizeof(uint32_t);
+
+		if (matrix_bytes <= user_param->size) {
+			memcpy((void *)(uintptr_t)ctx->sge_list[0].addr,
+				ctx->comm_matrix, matrix_bytes);
+
+			ctx->sge_list[0].length = matrix_bytes;
+			ctx->wr[0].send_flags |= IBV_SEND_SIGNALED;
+
+			err = post_send_method(ctx, 0, user_param);
+			if (err) {
+				fprintf(stderr, "Deep mode: failed to post comm_matrix on QP 0\n");
+				return_value = FAILURE;
+				goto cleaning;
+			}
+
+			printf("  Deep mode: QP 0 sent communication matrix (%u bytes, %d entries)\n",
+				matrix_bytes, ctx->comm_matrix_size);
+		} else {
+			fprintf(stderr, "Deep mode: comm_matrix size (%u) exceeds message size (%lu), skipping send\n",
+				matrix_bytes, (unsigned long)user_param->size);
+		}
+	}
+
 	/* main loop for posting */
 	while (1) {
-		/* 建链不发包 */
-		if(user_param->deep){
+		if (user_param->deep) {
 			sleep(1000);
 			continue;
 		}
-		
+
 	/* main loop to run over all the qps and post each time n messages */
 		for (index = 0 ; index < num_of_qps ; index++) {
 
@@ -7106,6 +7133,41 @@ int error_handler(char *error_message)
 {
 	fprintf(stderr, "%s\nERRNO: %s.\n", error_message, strerror(errno));
 	return FAILURE;
+}
+
+/* --- Communication Matrix --- */
+
+int init_comm_matrix(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param)
+{
+	int i;
+	int num_qps = user_param->num_of_qps;
+
+	if (num_qps <= 1) {
+		ctx->comm_matrix = NULL;
+		ctx->comm_matrix_size = 0;
+		printf("  Communication matrix: skipped (only %d QP)\n", num_qps);
+		return SUCCESS;
+	}
+
+	ctx->comm_matrix_size = num_qps - 1;
+	ctx->comm_matrix = (uint32_t *)malloc(sizeof(uint32_t) * ctx->comm_matrix_size);
+	if (!ctx->comm_matrix) {
+		fprintf(stderr, "Failed to allocate communication matrix\n");
+		return FAILURE;
+	}
+
+	for (i = 0; i < ctx->comm_matrix_size; i++) {
+		ctx->comm_matrix[i] = (uint32_t)(user_param->expid + i + 1);
+	}
+
+	printf("  Communication matrix initialized: %d entries [", ctx->comm_matrix_size);
+	for (i = 0; i < ctx->comm_matrix_size; i++) {
+		printf("%u%s", ctx->comm_matrix[i], (i < ctx->comm_matrix_size - 1) ? ", " : "");
+	}
+	printf("]\n");
+
+	return SUCCESS;
 }
 
 /* --- Data Validation Helpers --- */

@@ -327,6 +327,8 @@ struct pingpong_context {
 	uint64_t				recv_slots_offset;      /* Offset to recv slots (64-byte aligned) */
 		uint64_t				atomic_returns_offset;  /* Offset to atomic return values area (64-byte aligned) */
 	void					**user_data;           /* User data for deep mode */
+	uint32_t				*comm_matrix;          /* Communication matrix: qp_expid array for QPs 1..N-1 */
+	int					comm_matrix_size;      /* Number of entries in comm_matrix (num_of_qps - 1) */
 };
 
  struct pingpong_dest {
@@ -1197,5 +1199,23 @@ int data_validation_stop_and_report(struct pingpong_context *ctx,
 			   struct perftest_parameters *user_param,
 			   const char *role);
 void data_validation_destroy(struct pingpong_context *ctx);
+
+/* init_comm_matrix
+ *
+ * Description :
+ *
+ *  Initialize the communication matrix in pingpong_context.
+ *  The matrix contains qp_expid values for QPs with index 1..N-1,
+ *  where qp_expid = expbase + qp_index.
+ *
+ * Parameters :
+ *
+ *  ctx        - Resources structure.
+ *  user_param - the perftest parameters (must have expid and num_of_qps set).
+ *
+ * Return Value : SUCCESS, FAILURE.
+ */
+int init_comm_matrix(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param);
 
 #endif /* PERFTEST_RESOURCES_H */

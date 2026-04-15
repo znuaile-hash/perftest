@@ -511,6 +511,13 @@ int main(int argc, char *argv[])
 			}
 		}
 
+		if (user_param.deep) {
+			if (init_comm_matrix(&ctx, &user_param)) {
+				fprintf(stderr, " Failed to initialize communication matrix\n");
+				goto destroy_context;
+			}
+		}
+
 		if (user_param.verb == WRITE_IMM) {
 			if (ctx_hand_shake(&user_comm,&my_dest[0],&rem_dest[0])) {
 				fprintf(stderr,"Failed to exchange data between server and clients\n");
