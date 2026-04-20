@@ -103,6 +103,14 @@ struct ValidationContext;
 
 #define ERROR_MSG_SIZE (128)
 
+/* Deep mode (one-to-many) tunables.
+ * When --deep is set together with -s, the backing buffer is enlarged by
+ * MAX_EXPS * MAX_TOKENS so that the same MR can host data for many experts
+ * and tokens that share a single shared remote MR. */
+#define MAX_EXPS	(128)
+#define MAX_TOKENS	(128)
+#define DEEP_BUF_SCALE	((uint64_t)MAX_EXPS * (uint64_t)MAX_TOKENS)
+
 #ifdef HAVE_XRCD
 #define SERVER_FD "/tmp/xrc_domain_server"
 #define CLIENT_FD "/tmp/xrc_domain_client"

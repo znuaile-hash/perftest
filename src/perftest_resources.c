@@ -1289,6 +1289,28 @@ int alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_para
 	if (user_param->connection_type == UD)
 		ctx->buff_size += ctx->cache_line_size;
 
+	/* Feature 3: when running in deep (one-to-many) mode and the user
+	 * explicitly requested a buffer size with -s, enlarge the actual
+	 * allocated MR by MAX_EXPS * MAX_TOKENS so that the shared MR can
+	 * host data for many experts/tokens. The visible per-QP buffer
+	 * geometry (send_qp_buff_size, flow_buff_size, user_param->buff_size)
+	 * is left unchanged so SGE lengths and offsets keep using the user
+	 * specified message size. */
+	if (user_param->deep && user_param->req_size) {
+		uint64_t scaled = ctx->buff_size * DEEP_BUF_SCALE;
+		if (scaled / DEEP_BUF_SCALE != ctx->buff_size) {
+			fprintf(stderr,
+				"Deep mode: buffer size overflow when scaling by %lu\n",
+				(unsigned long)DEEP_BUF_SCALE);
+			return FAILURE;
+		}
+		printf("  Deep mode: scaling buffer 0x%lx -> 0x%lx (x %lu)\n",
+			(unsigned long)ctx->buff_size,
+			(unsigned long)scaled,
+			(unsigned long)DEEP_BUF_SCALE);
+		ctx->buff_size = scaled;
+	}
+
 	if (user_param->data_validation) {
 		ctx->payload_size = ctx->size;
 
@@ -3830,6 +3852,12 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 	}
 
 	for (i = 0; i < num_of_qps ; i++) {
+		/* Feature 4: in deep (one-to-many) mode every QP's WR remote
+		 * va/rkey are filled with the *base* of the remote MR
+		 * (i.e. rem_dest[xrc_offset + 0]) instead of being offset
+		 * per QP index. */
+		int dest_idx = user_param->deep ? xrc_offset : (xrc_offset + i);
+
 		if (user_param->connection_type == DC)
 		{
 			ctx->r_dctn[i] = rem_dest[xrc_offset + i].qpn;
@@ -3847,10 +3875,10 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 		}
 
 		if (user_param->verb == WRITE || user_param->verb == WRITE_IMM || user_param->verb == READ)
-			ctx->wr[i*user_param->post_list].wr.rdma.remote_addr   = rem_dest[xrc_offset + i].vaddr;
+			ctx->wr[i*user_param->post_list].wr.rdma.remote_addr   = rem_dest[dest_idx].vaddr;
 
 		else if (user_param->verb == ATOMIC)
-			ctx->wr[i*user_param->post_list].wr.atomic.remote_addr = rem_dest[xrc_offset + i].vaddr;
+			ctx->wr[i*user_param->post_list].wr.atomic.remote_addr = rem_dest[dest_idx].vaddr;
 
 		if (user_param->tst == BW || user_param->tst == LAT_BY_BW) {
 
@@ -3858,7 +3886,7 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 			ctx->ccnt[i] = 0;
 			ctx->my_addr[i] = (uintptr_t)ctx->buf[i];
 			if (user_param->verb != SEND && user_param->verb != SEND_IMM)
-				ctx->rem_addr[i] = rem_dest[xrc_offset + i].vaddr;
+				ctx->rem_addr[i] = rem_dest[dest_idx].vaddr;
 		}
 
 		for (j = 0; j < user_param->post_list; j++) {
@@ -3901,7 +3929,7 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 			}
 			if (user_param->verb == WRITE || user_param->verb == WRITE_IMM || user_param->verb == READ) {
 
-				ctx->wr[i*user_param->post_list + j].wr.rdma.rkey = rem_dest[xrc_offset + i].rkey;
+				ctx->wr[i*user_param->post_list + j].wr.rdma.rkey = rem_dest[dest_idx].rkey;
 				if (user_param->connection_type == SRD)
 					ctx->rem_qpn[xrc_offset + i] = rem_dest[xrc_offset + i].qpn;
 				if (j > 0) {
@@ -3916,7 +3944,7 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 
 			} else if (user_param->verb == ATOMIC) {
 
-				ctx->wr[i*user_param->post_list + j].wr.atomic.rkey = rem_dest[xrc_offset + i].rkey;
+				ctx->wr[i*user_param->post_list + j].wr.atomic.rkey = rem_dest[dest_idx].rkey;
 
 				if (j > 0) {
 
