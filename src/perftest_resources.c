@@ -5231,15 +5231,32 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 
 	user_param->tposted[0] = get_cycles();
 
-	/* In deep mode, QP 0 sends one packet carrying the communication matrix, then sleeps */
-	if (user_param->deep && ctx->comm_matrix != NULL && ctx->comm_matrix_size > 0) {
-		uint32_t matrix_bytes = ctx->comm_matrix_size * sizeof(uint32_t);
+	/* In deep mode, QP 0 sends one packet carrying the communication matrix, then sleeps.
+	 *
+	 * Feature 2: the matrix is placed into the QP 0 send buffer (the same
+	 *            buffer the WR already points at), so no extra SGE / inline
+	 *            path is needed.
+	 * Feature 1.4 / 1.2.3: va and rkey are refreshed from the outgoing WR
+	 *            right before posting so the peer sees the actual remote
+	 *            address of the shared MR.
+	 * Feature 5: the WR length keeps the user-requested -s size; we do NOT
+	 *            shrink sge_list[0].length to the matrix size even if the
+	 *            matrix is smaller. */
+	if (user_param->deep && ctx->comm_matrix != NULL) {
+		size_t pkt_bytes = sizeof(*ctx->comm_matrix);
 
-		if (matrix_bytes <= user_param->size) {
+		if (pkt_bytes <= user_param->size) {
+			update_comm_matrix_wr(ctx, user_param, &ctx->wr[0]);
+
 			memcpy((void *)(uintptr_t)ctx->sge_list[0].addr,
-				ctx->comm_matrix, matrix_bytes);
+				ctx->comm_matrix, pkt_bytes);
 
-			ctx->sge_list[0].length = matrix_bytes;
+			/* Feature 5: keep WR length = -s size (sge_list[0].length
+			 * was already set to user_param->size by
+			 * ctx_set_send_reg_wqes; force it here to defend against
+			 * any earlier mutation). */
+			ctx->sge_list[0].length = (user_param->connection_type == RawEth) ?
+				(user_param->size - HW_CRC_ADDITION) : user_param->size;
 			ctx->wr[0].send_flags |= IBV_SEND_SIGNALED;
 
 			err = post_send_method(ctx, 0, user_param);
@@ -5249,11 +5266,16 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 				goto cleaning;
 			}
 
-			printf("  Deep mode: QP 0 sent communication matrix (%u bytes, %d entries)\n",
-				matrix_bytes, ctx->comm_matrix_size);
+			printf("  Deep mode: QP 0 sent communication matrix "
+				"(pkt=%zu bytes, wr_len=%lu, exp_num=%u, va=0x%lx, rkey=0x%x)\n",
+				pkt_bytes,
+				(unsigned long)ctx->sge_list[0].length,
+				ctx->comm_matrix->matrix.exp_num,
+				(unsigned long)ctx->comm_matrix->matrix.va,
+				ctx->comm_matrix->matrix.rkey);
 		} else {
-			fprintf(stderr, "Deep mode: comm_matrix size (%u) exceeds message size (%lu), skipping send\n",
-				matrix_bytes, (unsigned long)user_param->size);
+			fprintf(stderr, "Deep mode: comm_matrix pkt (%zu) exceeds message size (%lu), skipping send\n",
+				pkt_bytes, (unsigned long)user_param->size);
 		}
 	}
 
@@ -7170,30 +7192,96 @@ int init_comm_matrix(struct pingpong_context *ctx,
 {
 	int i;
 	int num_qps = user_param->num_of_qps;
+	int exp_entries;
+	struct deep_comm_matrix_pkt *pkt;
+
+	ctx->comm_matrix = NULL;
+	ctx->comm_matrix_size = 0;
 
 	if (num_qps <= 1) {
-		ctx->comm_matrix = NULL;
-		ctx->comm_matrix_size = 0;
 		printf("  Communication matrix: skipped (only %d QP)\n", num_qps);
 		return SUCCESS;
 	}
 
-	ctx->comm_matrix_size = num_qps - 1;
-	ctx->comm_matrix = (uint32_t *)malloc(sizeof(uint32_t) * ctx->comm_matrix_size);
-	if (!ctx->comm_matrix) {
-		fprintf(stderr, "Failed to allocate communication matrix\n");
+	pkt = (struct deep_comm_matrix_pkt *)malloc(sizeof(*pkt));
+	if (!pkt) {
+		fprintf(stderr, "Failed to allocate deep communication matrix packet\n");
 		return FAILURE;
 	}
+	memset(pkt, 0, sizeof(*pkt));
 
-	for (i = 0; i < ctx->comm_matrix_size; i++) {
-		ctx->comm_matrix[i] = (uint32_t)(user_param->expid + i + 1);
+	/* 1.1 ETH_HDR: dmac = peer NIC MAC (if provided via -E), smac = 0,
+	 * eth_type = ETH_DEEP_TYPE in network byte order. */
+	if (user_param->is_dest_mac) {
+		memcpy(pkt->dmac, user_param->dest_mac, sizeof(pkt->dmac));
+	}
+	/* smac left zero as required */
+	pkt->eth_type = htons((uint16_t)ETH_DEEP_TYPE);
+
+	/* 1.2 Matrix body: exp_num = num_of_qps - 1; exp[i] = qp_expid for
+	 * QP (i+1) (i.e. expbase + i + 1). Only the first
+	 * DEEP_COMM_MATRIX_EXP_NUM entries of exp[] are populated; any extra
+	 * QPs beyond that are silently clamped since the struct is fixed. */
+	pkt->matrix.exp_num = (uint8_t)(num_qps - 1);
+	pkt->matrix.tid = 0;
+
+	exp_entries = num_qps - 1;
+	if (exp_entries > DEEP_COMM_MATRIX_EXP_NUM)
+		exp_entries = DEEP_COMM_MATRIX_EXP_NUM;
+
+	for (i = 0; i < exp_entries; i++) {
+		pkt->matrix.exp[i] = (uint8_t)(user_param->expid + i + 1);
+	}
+	pkt->matrix.rsvd = 0;
+	pkt->matrix.va = 0;     /* 1.2.3 filled from WR at send time */
+	pkt->matrix.rkey = 0;
+
+	ctx->comm_matrix = pkt;
+	ctx->comm_matrix_size = exp_entries;
+
+	printf("  Communication matrix initialized: exp_num=%u, %d expert(s) [",
+		pkt->matrix.exp_num, exp_entries);
+	for (i = 0; i < exp_entries; i++) {
+		printf("%u%s", pkt->matrix.exp[i],
+			(i < exp_entries - 1) ? ", " : "");
+	}
+	printf("], eth_type=0x%04x, pkt_size=%zu bytes\n",
+		ETH_DEEP_TYPE, sizeof(*pkt));
+
+	if ((num_qps - 1) > DEEP_COMM_MATRIX_EXP_NUM) {
+		printf("  Communication matrix: warning - %d QPs exceeds DEEP_COMM_MATRIX_EXP_NUM (%d), "
+			"exp[] truncated\n",
+			num_qps - 1, DEEP_COMM_MATRIX_EXP_NUM);
 	}
 
-	printf("  Communication matrix initialized: %d entries [", ctx->comm_matrix_size);
-	for (i = 0; i < ctx->comm_matrix_size; i++) {
-		printf("%u%s", ctx->comm_matrix[i], (i < ctx->comm_matrix_size - 1) ? ", " : "");
+	return SUCCESS;
+}
+
+int update_comm_matrix_wr(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param,
+		struct ibv_send_wr *wr)
+{
+	if (!ctx || !ctx->comm_matrix || !wr)
+		return FAILURE;
+
+	/* 1.2.3 / 1.4 : snapshot va + rkey from the WR immediately before
+	 * posting. For WRITE/READ we read from wr.rdma, for ATOMIC from
+	 * wr.atomic. Other verbs do not carry remote va/rkey so we just
+	 * leave the existing values alone. */
+	switch (user_param->verb) {
+	case WRITE:
+	case WRITE_IMM:
+	case READ:
+		ctx->comm_matrix->matrix.va   = (uint64_t)wr->wr.rdma.remote_addr;
+		ctx->comm_matrix->matrix.rkey = (uint32_t)wr->wr.rdma.rkey;
+		break;
+	case ATOMIC:
+		ctx->comm_matrix->matrix.va   = (uint64_t)wr->wr.atomic.remote_addr;
+		ctx->comm_matrix->matrix.rkey = (uint32_t)wr->wr.atomic.rkey;
+		break;
+	default:
+		break;
 	}
-	printf("]\n");
 
 	return SUCCESS;
 }

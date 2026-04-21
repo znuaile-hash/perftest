@@ -111,6 +111,42 @@ struct ValidationContext;
 #define MAX_TOKENS	(128)
 #define DEEP_BUF_SCALE	((uint64_t)MAX_EXPS * (uint64_t)MAX_TOKENS)
 
+/* Deep-mode ethertype carried in the communication-matrix packet that QP 0
+ * sends before the main traffic starts. The packet is consumed by the peer
+ * NIC firmware, not by the normal RDMA/IP stack. */
+#define ETH_DEEP_TYPE	(0x0882)
+
+/* Max number of expert ids carried in one communication matrix. Fixed by
+ * the on-wire format (exp[10]) regardless of num_of_qps. */
+#define DEEP_COMM_MATRIX_EXP_NUM	(10)
+
+/* Communication matrix body. Packed on-wire layout:
+ *   u8 exp_num; u8 tid; u8 exp[10]; u32 rsvd; u64 va; u32 rkey;
+ *
+ *   exp_num - num_of_qps - 1 (clamped to DEEP_COMM_MATRIX_EXP_NUM)
+ *   tid     - token/trace id, kept 0 for now
+ *   exp[i]  - qp_expid of QP (i+1), computed as expbase + (i+1)
+ *   va/rkey - filled from the outgoing WR at post-send time */
+struct deep_comm_matrix {
+	uint8_t		exp_num;
+	uint8_t		tid;
+	uint8_t		exp[DEEP_COMM_MATRIX_EXP_NUM];
+	uint32_t	rsvd;
+	uint64_t	va;
+	uint32_t	rkey;
+} __attribute__((packed));
+
+/* Full deep-mode packet: ETH_HDR (dmac+smac+eth_type) + comm matrix body.
+ *   dmac     - peer NIC MAC (user_param->dest_mac when provided, else zeros)
+ *   smac     - all zeros (per spec)
+ *   eth_type - ETH_DEEP_TYPE, stored in network byte order on the wire */
+struct deep_comm_matrix_pkt {
+	uint8_t				dmac[6];
+	uint8_t				smac[6];
+	uint16_t			eth_type;
+	struct deep_comm_matrix		matrix;
+} __attribute__((packed));
+
 #ifdef HAVE_XRCD
 #define SERVER_FD "/tmp/xrc_domain_server"
 #define CLIENT_FD "/tmp/xrc_domain_client"
@@ -335,8 +371,8 @@ struct pingpong_context {
 	uint64_t				recv_slots_offset;      /* Offset to recv slots (64-byte aligned) */
 		uint64_t				atomic_returns_offset;  /* Offset to atomic return values area (64-byte aligned) */
 	void					**user_data;           /* User data for deep mode */
-	uint32_t				*comm_matrix;          /* Communication matrix: qp_expid array for QPs 1..N-1 */
-	int					comm_matrix_size;      /* Number of entries in comm_matrix (num_of_qps - 1) */
+	struct deep_comm_matrix_pkt		*comm_matrix;          /* Deep mode: ETH header + communication matrix + va/rkey sent by QP 0 */
+	int					comm_matrix_size;      /* Logical number of populated exp[] entries (= min(num_of_qps - 1, DEEP_COMM_MATRIX_EXP_NUM)) */
 };
 
  struct pingpong_dest {
@@ -1212,9 +1248,19 @@ void data_validation_destroy(struct pingpong_context *ctx);
  *
  * Description :
  *
- *  Initialize the communication matrix in pingpong_context.
- *  The matrix contains qp_expid values for QPs with index 1..N-1,
- *  where qp_expid = expbase + qp_index.
+ *  Allocate and initialize the deep-mode communication matrix packet inside
+ *  pingpong_context. The packet contains:
+ *    ETH_HDR(dmac + smac + eth_type) + matrix body
+ *  where the matrix body holds:
+ *    - exp_num = num_of_qps - 1
+ *    - tid     = 0 (reserved for future use)
+ *    - exp[i]  = qp_expid for QP (i+1); qp_expid = expbase + qp_index
+ *    - rsvd    = 0
+ *    - va/rkey = zero (updated at send time by update_comm_matrix_wr)
+ *
+ *  dmac is copied from user_param->dest_mac when provided, otherwise set to
+ *  all-zero. smac is always zero, and eth_type is ETH_DEEP_TYPE (in network
+ *  byte order on the wire).
  *
  * Parameters :
  *
@@ -1225,5 +1271,27 @@ void data_validation_destroy(struct pingpong_context *ctx);
  */
 int init_comm_matrix(struct pingpong_context *ctx,
 		struct perftest_parameters *user_param);
+
+/* update_comm_matrix_wr
+ *
+ * Description :
+ *
+ *  Refresh the va and rkey fields of the communication matrix from the
+ *  supplied send WR, immediately before the WR is posted to the HW. For
+ *  WRITE/WRITE_IMM/READ verbs these come from wr->wr.rdma.{remote_addr,rkey};
+ *  for ATOMIC verbs from wr->wr.atomic.{remote_addr,rkey}. If the WR does
+ *  not carry RDMA info, va/rkey are left untouched.
+ *
+ * Parameters :
+ *
+ *  ctx        - Resources structure (must have ctx->comm_matrix set).
+ *  user_param - the perftest parameters (for verb selection).
+ *  wr         - the send WR whose remote va/rkey should be snapshot.
+ *
+ * Return Value : SUCCESS, FAILURE.
+ */
+int update_comm_matrix_wr(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param,
+		struct ibv_send_wr *wr);
 
 #endif /* PERFTEST_RESOURCES_H */
