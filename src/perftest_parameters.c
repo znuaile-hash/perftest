@@ -3059,6 +3059,7 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 			{.name = "sig_offload", .has_arg = 0, .flag = &sig_offload_flag, .val = 1 },
 			#endif
 			{.name = "exp", .has_arg = 1, .flag = &exp_flag, .val = 1 },
+			{.name = "expid", .has_arg = 1, .flag = &exp_flag, .val = 1 },
 			{.name = "deep", .has_arg = 0, .flag = &deep_flag, .val = 1 },
 			{.name = "data_validation", .has_arg = 0, .flag = &data_validation_flag, .val = 1 },
 			{.name = "data_validation_debug", .has_arg = 0, .flag = &data_validation_debug_flag, .val = 1 },
