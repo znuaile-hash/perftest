@@ -16,6 +16,7 @@
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <pthread.h>
+#include <endian.h>
 #if defined(__FreeBSD__)
 #include <sys/stat.h>
 #endif
@@ -848,22 +849,39 @@ static inline int post_send_method(struct pingpong_context *ctx, int index,
 
 }
 
+/* Refresh matrix.va / matrix.rkey from the outgoing WR and convert them to
+ * big-endian (network byte order) so every multi-byte field that leaves the
+ * wire - eth_hdr.ethdeeptype, matrix.va, matrix.rkey - is encoded the same
+ * way. HCA hardware only byte-swaps RETH fields (which live in the transport
+ * header); the communication matrix is carried as RDMA WRITE payload, so we
+ * must do the byte-swap in software here. Use htobe64 / htobe32 from
+ * <endian.h>: on little-endian hosts they emit the byte swap, on big-endian
+ * hosts they are no-ops. */
 static void deep_update_comm_matrix_from_wr(struct pingpong_context *ctx,
 		struct perftest_parameters *user_param,
 		struct ibv_send_wr *wr)
 {
-	ctx->comm_matrix.matrix.va = 0;
-	ctx->comm_matrix.matrix.rkey = 0;
+	uint64_t va_host = 0;
+	uint32_t rkey_host = 0;
 
 	if (user_param->verb == WRITE || user_param->verb == WRITE_IMM || user_param->verb == READ) {
-		ctx->comm_matrix.matrix.va = wr->wr.rdma.remote_addr;
-		ctx->comm_matrix.matrix.rkey = wr->wr.rdma.rkey;
+		va_host = wr->wr.rdma.remote_addr;
+		rkey_host = wr->wr.rdma.rkey;
 	} else if (user_param->verb == ATOMIC) {
-		ctx->comm_matrix.matrix.va = wr->wr.atomic.remote_addr;
-		ctx->comm_matrix.matrix.rkey = wr->wr.atomic.rkey;
+		va_host = wr->wr.atomic.remote_addr;
+		rkey_host = wr->wr.atomic.rkey;
 	}
+
+	ctx->comm_matrix.matrix.va   = htobe64(va_host);
+	ctx->comm_matrix.matrix.rkey = htobe32(rkey_host);
 }
 
+/* Feature 2: place the communication matrix into QP 0's pre-registered
+ * send buffer (the one sge_list[0].addr already points at) and post it as
+ * a single WR on QP 0. We deliberately avoid IBV_SEND_INLINE because
+ * inline capacity is HCA-dependent and often smaller than the packed
+ * payload. See the long comment above init_comm_matrix() for the full
+ * analysis / trade-off. */
 static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
 		struct perftest_parameters *user_param)
 {
@@ -877,10 +895,18 @@ static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
 		return FAILURE;
 	}
 
+	/* Feature 1.4 / 1.2.3: refresh va/rkey from the outgoing WR so the
+	 * peer sees the actual remote address of the shared MR. Feature 4
+	 * already guarantees wr[0].wr.rdma.{remote_addr,rkey} carry the base
+	 * of the remote MR. The helper also performs the host->big-endian
+	 * conversion so what the peer sees in the payload matches the wire
+	 * convention of the other multi-byte fields (ethdeeptype). */
 	deep_update_comm_matrix_from_wr(ctx, user_param, wr);
 	memcpy((void *)(uintptr_t)ctx->sge_list[0].addr, &ctx->comm_matrix, payload_bytes);
 
-	/* Feature 5: keep WR data length as the user-provided -s size. */
+	/* Feature 5: keep WR data length as the user-provided -s size; the
+	 * extra bytes beyond the matrix remain whatever the send buffer held
+	 * (zero-initialized on first use). */
 	ctx->sge_list[0].length = user_param->size;
 	ctx->wr[0].send_flags |= IBV_SEND_SIGNALED;
 
@@ -4489,6 +4515,11 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 	if (user_param->test_type == ITERATIONS && user_param->noPeak == ON)
 		user_param->tposted[0] = get_cycles();
 
+	/* In deep (one-to-many) mode, QP 0 sends one packet carrying the
+	 * communication matrix and then the process silently waits - no
+	 * business traffic is driven on any QP. We drain the single
+	 * SIGNALED completion so it does not pollute any later CQ poll,
+	 * then loop on sleep() to keep the connections / QPs alive. */
 	if (user_param->deep) {
 		if (init_comm_matrix(ctx, user_param)) {
 			fprintf(stderr, "Deep mode: failed to initialize communication matrix\n");
@@ -4500,6 +4531,29 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 			return_value = FAILURE;
 			goto cleaning;
 		}
+		printf("  Deep mode: QP 0 sent communication payload (%lu bytes)\n",
+			(unsigned long)sizeof(ctx->comm_matrix));
+
+		{
+			struct ibv_wc drain_wc;
+			int drain_ne = 0;
+			while (drain_ne == 0) {
+				drain_ne = ibv_poll_cq(ctx->send_cq, 1, &drain_wc);
+			}
+			if (drain_ne < 0 || drain_wc.status != IBV_WC_SUCCESS) {
+				fprintf(stderr,
+					"Deep mode: matrix WC status=%d (ne=%d)\n",
+					drain_wc.status, drain_ne);
+				return_value = FAILURE;
+				goto cleaning;
+			}
+		}
+
+		printf("  Deep mode: waiting silently after matrix send.\n");
+		while (1) {
+			sleep(1);
+		}
+		/* unreachable */
 	}
 
 	/* If using rate limiter, calculate gap time between bursts */
@@ -5286,7 +5340,11 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 
 	user_param->tposted[0] = get_cycles();
 
-	/* In deep mode, QP 0 sends one packet carrying the communication matrix, then sleeps */
+	/* In deep mode, QP 0 sends one packet carrying the communication
+	 * matrix (one-shot announcement) and then the process silently
+	 * waits - no business traffic is driven. The drain below picks up
+	 * the single SIGNALED completion so it does not pollute any later
+	 * CQ poll. */
 	if (user_param->deep) {
 		if (init_comm_matrix(ctx, user_param)) {
 			fprintf(stderr, "Deep mode: failed to initialize communication matrix\n");
@@ -5300,12 +5358,32 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 		}
 		printf("  Deep mode: QP 0 sent communication payload (%lu bytes)\n",
 			(unsigned long)sizeof(ctx->comm_matrix));
+
+		{
+			struct ibv_wc drain_wc;
+			int drain_ne = 0;
+			while (drain_ne == 0) {
+				drain_ne = ibv_poll_cq(ctx->send_cq, 1, &drain_wc);
+			}
+			if (drain_ne < 0 || drain_wc.status != IBV_WC_SUCCESS) {
+				fprintf(stderr,
+					"Deep mode: matrix WC status=%d (ne=%d)\n",
+					drain_wc.status, drain_ne);
+				return_value = FAILURE;
+				goto cleaning;
+			}
+		}
+
+		printf("  Deep mode: waiting silently after matrix send.\n");
 	}
 
 	/* main loop for posting */
 	while (1) {
 		if (user_param->deep) {
-			sleep(1000);
+			/* Silent wait: keep the process (and thereby the
+			 * connections / QP 0) alive forever; no further WRs
+			 * are posted. */
+			sleep(1);
 			continue;
 		}
 
@@ -7208,7 +7286,51 @@ int error_handler(char *error_message)
 	return FAILURE;
 }
 
-/* --- Communication Matrix --- */
+/* --- Communication Matrix ---
+ *
+ * Deep (one-to-many) mode layout built by init_comm_matrix():
+ *
+ *   struct deep_comm_payload {
+ *       struct deep_eth_header {
+ *           uint8_t  dmac[6];         // peer NIC MAC
+ *           uint8_t  smac[6];         // zero per spec
+ *           uint16_t ethdeeptype;     // 0x0882, stored big-endian on the wire
+ *       } eth_hdr;
+ *       struct deep_comm_matrix {
+ *           uint8_t  exp_num;         // #filled entries in exp[]
+ *           uint8_t  tid;
+ *           uint8_t  exp[10];         // qp_expid of QPs 1..N-1, clamped
+ *           uint32_t rsvd;
+ *           uint64_t va;              // refreshed from WR at send time, big-endian on the wire
+ *           uint32_t rkey;            // refreshed from WR at send time, big-endian on the wire
+ *       } matrix;
+ *   } __attribute__((packed));
+ *
+ * Byte-order convention for this payload:
+ *   - Fields that leave the wire and are >1 byte (ethdeeptype, matrix.va,
+ *     matrix.rkey) are encoded big-endian. ethdeeptype is set via htons()
+ *     in init_comm_matrix(); va/rkey via htobe64/htobe32() in
+ *     deep_update_comm_matrix_from_wr() right before post_send. The
+ *     HCA only byte-swaps RETH fields in the transport header - this
+ *     payload is opaque data to it, so we must do the conversion in
+ *     software. Peers must read the matrix with be64toh / be32toh.
+ *
+ * Feature 2 analysis ("矩阵加到 wqe 还是 buff"):
+ *   - Putting it in the WQE (IBV_SEND_INLINE) requires `inline_size` >=
+ *     sizeof(deep_comm_payload) AND is only supported for small payloads
+ *     on many HCAs, so it would silently break on devices with small
+ *     inline caps.
+ *   - Putting it in the existing send buffer (the one sge_list[0] already
+ *     points at) is device-agnostic: ctx_set_send_reg_wqes() has already
+ *     allocated, registered and wired up the MR / SGE / WR chain for QP 0,
+ *     so we just memcpy the packed struct into that buffer right before
+ *     post_send(). This leaves Feature 3 (buffer scaling) and Feature 5
+ *     (sge_list[].length = -s size) untouched, and works for any verb
+ *     (WRITE / WRITE_IMM / READ / ATOMIC) because we don't rely on
+ *     inline semantics.
+ *   => We chose the send buffer path, implemented in
+ *      deep_send_comm_matrix_packet().
+ */
 
 int init_comm_matrix(struct pingpong_context *ctx,
 		struct perftest_parameters *user_param)
@@ -7220,45 +7342,80 @@ int init_comm_matrix(struct pingpong_context *ctx,
 	int num_qps = user_param->num_of_qps;
 
 	memset(&ctx->comm_matrix, 0, sizeof(ctx->comm_matrix));
+	ctx->comm_matrix_size = 0;
 
-	if (num_qps <= 0) {
-		ctx->comm_matrix_size = 0;
+	/* Fix #4: reject only genuinely invalid counts; num_qps == 1 is a
+	 * legal one-to-one case and must still produce a well-formed packet
+	 * (exp_num = 0, empty exp[]). */
+	if (num_qps < 1) {
 		fprintf(stderr, "Communication matrix: invalid QP count %d\n", num_qps);
 		return FAILURE;
 	}
 
-	/* ETH header: dmac=peer mac (if known), smac=0, ethdeeptype=0x0882. */
+	/* ETH header:
+	 *   dmac  - 对端网卡 MAC. We look at --remote_mac first (raw-eth's own
+	 *           option, reused here), then --dest_mac/-E, finally fall back
+	 *           to all-zero if neither is provided.
+	 *   smac  - all zeros (per spec).
+	 *   ethdeeptype - DEEP_ETHERTYPE (0x0882). Fix #1: the field must appear
+	 *           big-endian on the wire (standard Ethernet convention), so we
+	 *           store it via htons() regardless of host endianness. */
 	if (!memcmp(peer_mac, zero_mac, sizeof(zero_mac)) && user_param->is_dest_mac) {
 		peer_mac = user_param->dest_mac;
 	}
 	memcpy(ctx->comm_matrix.eth_hdr.dmac, peer_mac, sizeof(ctx->comm_matrix.eth_hdr.dmac));
 	memset(ctx->comm_matrix.eth_hdr.smac, 0, sizeof(ctx->comm_matrix.eth_hdr.smac));
-	ctx->comm_matrix.eth_hdr.ethdeeptype = DEEP_ETHERTYPE;
+	ctx->comm_matrix.eth_hdr.ethdeeptype = htons((uint16_t)DEEP_ETHERTYPE);
 
-	ctx->comm_matrix.matrix.exp_num = (uint8_t)((num_qps - 1) & 0xff);
-	ctx->comm_matrix.matrix.tid = 0;
-	ctx->comm_matrix.matrix.rsvd = 0;
-	ctx->comm_matrix.matrix.va = 0;
-	ctx->comm_matrix.matrix.rkey = 0;
+	/* Fix #2: peer MAC is a protocol-level requirement for the deep-mode
+	 * firmware path; if the user forgot to pass --remote_mac / --dest_mac
+	 * the dmac will go out as 00:00:00:00:00:00, which almost certainly
+	 * gets dropped. Warn loudly but do not fail, so users running loopback
+	 * or debug setups can still exercise the code path. */
+	if (!memcmp(ctx->comm_matrix.eth_hdr.dmac, zero_mac, sizeof(zero_mac))) {
+		fprintf(stderr,
+			"  WARNING: deep mode dmac is all-zero; pass --remote_mac "
+			"or -E/--dest_mac with the peer NIC MAC for a usable packet.\n");
+	}
 
+	/* Populate the matrix body. The on-wire struct fixes exp[] at
+	 * DEEP_MAX_EXP_ENTRIES (=10) u8 slots. We can carry at most that many
+	 * QP ids regardless of num_of_qps. */
 	exp_entries = num_qps - 1;
 	if (exp_entries > DEEP_MAX_EXP_ENTRIES) {
-		printf("  Communication matrix: truncating exp entries from %d to %d\n",
+		printf("  Communication matrix: truncating exp entries from %d to %d "
+			"(exp_num will be reported as truncated to avoid reader overflow)\n",
 			exp_entries, DEEP_MAX_EXP_ENTRIES);
 		exp_entries = DEEP_MAX_EXP_ENTRIES;
 	}
+
+	/* Fix #3: exp_num must describe how many slots are actually valid in
+	 * exp[] so the peer never reads past the array. When we truncate, we
+	 * set exp_num to the clamped value rather than the raw (num_qps - 1). */
+	ctx->comm_matrix.matrix.exp_num = (uint8_t)(exp_entries & 0xff);
+	ctx->comm_matrix.matrix.tid     = 0;
+	ctx->comm_matrix.matrix.rsvd    = 0;
+	ctx->comm_matrix.matrix.va      = 0;
+	ctx->comm_matrix.matrix.rkey    = 0;
 	ctx->comm_matrix_size = exp_entries;
 
+	/* 1.2.2: QPs with index != 0 contribute their qp_expid = expbase +
+	 * qp_index to exp[] in ascending order. QP 0's id is not carried. */
 	for (i = 0; i < exp_entries; i++) {
-		ctx->comm_matrix.matrix.exp[i] = (uint8_t)((user_param->expid + i + 1) & 0xff);
+		ctx->comm_matrix.matrix.exp[i] =
+			(uint8_t)((user_param->expid + i + 1) & 0xff);
 	}
 
 	printf("  Communication matrix initialized: exp_num=%u, exp entries=%d [",
 		ctx->comm_matrix.matrix.exp_num, ctx->comm_matrix_size);
 	for (i = 0; i < ctx->comm_matrix_size; i++) {
-		printf("%u%s", ctx->comm_matrix.matrix.exp[i], (i < ctx->comm_matrix_size - 1) ? ", " : "");
+		printf("%u%s", ctx->comm_matrix.matrix.exp[i],
+			(i < ctx->comm_matrix_size - 1) ? ", " : "");
 	}
-	printf("]\n");
+	printf("], ethdeeptype=0x%04x (net=0x%04x), payload=%lu bytes\n",
+		DEEP_ETHERTYPE,
+		(unsigned)ctx->comm_matrix.eth_hdr.ethdeeptype,
+		(unsigned long)sizeof(ctx->comm_matrix));
 
 	return SUCCESS;
 }
