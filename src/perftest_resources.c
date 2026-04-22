@@ -3005,10 +3005,16 @@ int create_reg_qp_main(struct pingpong_context *ctx,
 
 	ctx->qp[i] = ctx_qp_create(ctx, user_param, i, user_data);
 
-	if (user_param->deep && user_data) {
-		ctx->user_data[i] = user_data;
-	} else {
-		ctx->user_data[i] = NULL;
+	if (ctx->user_data) {
+		if (user_param->deep && user_data) {
+			ctx->user_data[i] = user_data;
+		} else {
+			ctx->user_data[i] = NULL;
+		}
+	} else if (user_data) {
+		/* Defensive: user_data was allocated but there's nowhere to
+		 * stash it - free now to avoid a leak on the error path. */
+		free(user_data);
 	}
 	}
 
@@ -3058,12 +3064,14 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 	int is_dc_server_side = 0;
 	struct ibv_qp_init_attr attr;
 	memset(&attr, 0, sizeof(struct ibv_qp_init_attr));
+	attr.qp_context = NULL;
 	struct ibv_qp_cap *qp_cap = &attr.cap;
 
 	#ifdef HAVE_IBV_WR_API
 	enum ibv_wr_opcode opcode;
 	struct ibv_qp_init_attr_ex attr_ex;
 	memset(&attr_ex, 0, sizeof(struct ibv_qp_init_attr_ex));
+	attr_ex.qp_context = NULL;
 	#ifdef HAVE_MLX5DV
 	struct mlx5dv_qp_init_attr attr_dv;
 	memset(&attr_dv, 0, sizeof(attr_dv));
@@ -3319,7 +3327,6 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 			else
 			#endif //HAVE_HNSDV
 			{
-				printf("Using standard QP ex creation ibv_create_qp_ex attr_ex.qp_context: %p\n", attr_ex.qp_context);
 				qp = ibv_create_qp_ex(ctx->context, &attr_ex);
 			}
 		}
