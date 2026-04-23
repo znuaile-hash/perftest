@@ -886,7 +886,20 @@ static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
 		struct perftest_parameters *user_param)
 {
 	const size_t payload_bytes = sizeof(ctx->comm_matrix);
-	struct ibv_send_wr *wr = &ctx->wr[0];
+	struct ibv_send_wr *wr;
+
+	/* Deep-mode announcement reuses QP 0's WR + SGE chain which is only
+	 * built for the CLIENT / duplex / LAT path (see alloc_ctx()). If we
+	 * are called without that chain allocated (e.g. SERVER-only half
+	 * duplex, or a misconfigured setup) bail out cleanly instead of
+	 * dereferencing NULL. */
+	if (!ctx || !ctx->wr || !ctx->sge_list) {
+		fprintf(stderr,
+			"Deep mode: send WR/SGE chain not available, skipping matrix send\n");
+		return FAILURE;
+	}
+
+	wr = &ctx->wr[0];
 
 	if (payload_bytes > user_param->size) {
 		fprintf(stderr,
@@ -2993,29 +3006,34 @@ int create_reg_qp_main(struct pingpong_context *ctx,
 		#endif
 	} else {
 		void *user_data = NULL;
-	if (user_param->deep) {
-		int *data = malloc(sizeof(int));
-		if (!data) {
-			fprintf(stderr, "Failed to allocate memory for user_data\n");
-			return FAILURE;
-		}
-		*data = user_param->expid + i;
-		user_data = data;
-	}
 
-	ctx->qp[i] = ctx_qp_create(ctx, user_param, i, user_data);
-
-	if (ctx->user_data) {
-		if (user_param->deep && user_data) {
-			ctx->user_data[i] = user_data;
-		} else {
-			ctx->user_data[i] = NULL;
+		if (user_param->deep) {
+			int *data = malloc(sizeof(int));
+			if (!data) {
+				fprintf(stderr, "Failed to allocate memory for user_data\n");
+				return FAILURE;
+			}
+			*data = user_param->expid + i;
+			user_data = data;
 		}
-	} else if (user_data) {
-		/* Defensive: user_data was allocated but there's nowhere to
-		 * stash it - free now to avoid a leak on the error path. */
-		free(user_data);
-	}
+
+		ctx->qp[i] = ctx_qp_create(ctx, user_param, i, user_data);
+
+		if (ctx->qp[i] == NULL) {
+			/* ctx_qp_create failed; avoid leaking user_data we just
+			 * allocated. ctx->user_data[i] hasn't been populated
+			 * yet, so we are the only owner. */
+			if (user_data)
+				free(user_data);
+		} else if (ctx->user_data) {
+			ctx->user_data[i] = (user_param->deep && user_data)
+				? user_data : NULL;
+		} else if (user_data) {
+			/* Defensive: ctx->user_data array is not available
+			 * but we allocated a per-QP blob - free it to avoid
+			 * a leak. */
+			free(user_data);
+		}
 	}
 
 	if (ctx->qp[i] == NULL) {
@@ -3063,15 +3081,14 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 
 	int is_dc_server_side = 0;
 	struct ibv_qp_init_attr attr;
+	struct ibv_qp_cap *qp_cap;
 	memset(&attr, 0, sizeof(struct ibv_qp_init_attr));
-	attr.qp_context = NULL;
-	struct ibv_qp_cap *qp_cap = &attr.cap;
+	qp_cap = &attr.cap;
 
 	#ifdef HAVE_IBV_WR_API
 	enum ibv_wr_opcode opcode;
 	struct ibv_qp_init_attr_ex attr_ex;
 	memset(&attr_ex, 0, sizeof(struct ibv_qp_init_attr_ex));
-	attr_ex.qp_context = NULL;
 	#ifdef HAVE_MLX5DV
 	struct mlx5dv_qp_init_attr attr_dv;
 	memset(&attr_dv, 0, sizeof(attr_dv));
@@ -3092,11 +3109,13 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
 	attr.send_cq = ctx->send_cq;
 	attr.recv_cq = has_recv_comp(user_param->verb) ? ctx->recv_cq : ctx->send_cq;
 
-	/* Set user context if in deep mode */
+	/* qp_context is only used to carry the deep-mode user_data blob;
+	 * for the normal path it must remain NULL (memset already cleared it).
+	 * Guard on user_param->deep so a stale non-NULL user_data passed by
+	 * a caller can never leak into attr.qp_context when the feature is
+	 * disabled. */
 	if (user_param->deep && user_data) {
 		attr.qp_context = user_data;
-	} else {
-		attr.qp_context = NULL;
 	}
 
 	is_dc_server_side = ((!(user_param->duplex || user_param->tst == LAT) &&
