@@ -2140,6 +2140,8 @@ int check_mtu(struct ibv_context *context,struct perftest_parameters *user_param
 		if (!user_param->dont_xchg_versions) {
 			/*add mtu set in remote node from version 5.1 and above*/
 			if (rem_vers >= 5.1 ) {
+				memset(cur, 0, sizeof(cur));
+				memset(rem, 0, sizeof(rem));
 				sprintf(cur,"%d",curr_mtu);
 
 				/*fix a buffer overflow issue in ppc.*/
@@ -2149,6 +2151,9 @@ int check_mtu(struct ibv_context *context,struct perftest_parameters *user_param
 					fprintf(stderr," Failed to exchange data between server and clients\n");
 					exit(1);
 				}
+				/* When only 2 bytes are exchanged for old compatibility, ensure
+				 * the parsing buffer is still NUL-terminated before strtol(). */
+				rem[size_of_cur < (int)sizeof(rem) ? size_of_cur : (int)sizeof(rem) - 1] = '\0';
 				rem_mtu = (int) strtol(rem, (char **)NULL, 10);
 				user_param->curr_mtu = (enum ibv_mtu)((valid_mtu_size(rem_mtu) && (curr_mtu > rem_mtu)) ? rem_mtu : curr_mtu);
 			} else {
