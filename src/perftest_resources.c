@@ -876,6 +876,87 @@ static void deep_update_comm_matrix_from_wr(struct pingpong_context *ctx,
 	ctx->comm_matrix.matrix.rkey = htobe32(rkey_host);
 }
 
+/* Dump QP 0's outgoing WR and the staged communication matrix. Called
+ * before and after post_send in deep mode so the user can verify what
+ * was actually put on the wire. va / rkey inside the matrix are stored
+ * big-endian (network order); we also print the host-order
+ * interpretation for readability. */
+static void deep_dump_wr_and_matrix(const char *tag,
+		struct pingpong_context *ctx,
+		struct perftest_parameters *user_param)
+{
+	struct ibv_send_wr *wr = &ctx->wr[0];
+	struct ibv_sge *sge = wr->sg_list;
+	const struct deep_comm_payload *m = &ctx->comm_matrix;
+	int i;
+
+	printf("====== Deep mode dump [%s] ======\n", tag);
+	printf("  WR[0]: wr_id=0x%lx opcode=%d send_flags=0x%x num_sge=%d next=%p\n",
+		(unsigned long)wr->wr_id, (int)wr->opcode,
+		(unsigned)wr->send_flags, wr->num_sge, (void *)wr->next);
+	if (sge) {
+		printf("  SGE:   addr=0x%lx length=%u lkey=0x%x\n",
+			(unsigned long)sge->addr,
+			(unsigned)sge->length,
+			(unsigned)sge->lkey);
+	} else {
+		printf("  SGE:   (null)\n");
+	}
+
+	if (user_param->verb == WRITE ||
+	    user_param->verb == WRITE_IMM ||
+	    user_param->verb == READ) {
+		printf("  RDMA:  remote_addr=0x%lx rkey=0x%x\n",
+			(unsigned long)wr->wr.rdma.remote_addr,
+			(unsigned)wr->wr.rdma.rkey);
+	} else if (user_param->verb == ATOMIC) {
+		printf("  ATOM:  remote_addr=0x%lx rkey=0x%x compare_add=0x%lx swap=0x%lx\n",
+			(unsigned long)wr->wr.atomic.remote_addr,
+			(unsigned)wr->wr.atomic.rkey,
+			(unsigned long)wr->wr.atomic.compare_add,
+			(unsigned long)wr->wr.atomic.swap);
+	}
+
+	printf("  Matrix.eth: dmac=%02x:%02x:%02x:%02x:%02x:%02x "
+		"smac=%02x:%02x:%02x:%02x:%02x:%02x "
+		"ethdeeptype=0x%04x (host=0x%04x)\n",
+		m->eth_hdr.dmac[0], m->eth_hdr.dmac[1], m->eth_hdr.dmac[2],
+		m->eth_hdr.dmac[3], m->eth_hdr.dmac[4], m->eth_hdr.dmac[5],
+		m->eth_hdr.smac[0], m->eth_hdr.smac[1], m->eth_hdr.smac[2],
+		m->eth_hdr.smac[3], m->eth_hdr.smac[4], m->eth_hdr.smac[5],
+		(unsigned)m->eth_hdr.ethdeeptype,
+		(unsigned)ntohs(m->eth_hdr.ethdeeptype));
+	printf("  Matrix.body: exp_num=%u tid=%u rsvd=%u "
+		"va_wire=0x%016lx (host=0x%016lx) "
+		"rkey_wire=0x%08x (host=0x%08x)\n",
+		(unsigned)m->matrix.exp_num,
+		(unsigned)m->matrix.tid,
+		(unsigned)m->matrix.rsvd,
+		(unsigned long)m->matrix.va,
+		(unsigned long)be64toh(m->matrix.va),
+		(unsigned)m->matrix.rkey,
+		(unsigned)be32toh(m->matrix.rkey));
+	printf("  Matrix.exp[%d] = [", ctx->comm_matrix_size);
+	for (i = 0; i < ctx->comm_matrix_size; i++) {
+		printf("%u%s", (unsigned)m->matrix.exp[i],
+			(i < ctx->comm_matrix_size - 1) ? ", " : "");
+	}
+	printf("]\n");
+
+	{
+		const uint8_t *raw = (const uint8_t *)m;
+		size_t bytes = sizeof(*m);
+		size_t j;
+		printf("  Matrix raw bytes (%lu):", (unsigned long)bytes);
+		for (j = 0; j < bytes; j++) {
+			if ((j % 16) == 0) printf("\n    %04lx:", (unsigned long)j);
+			printf(" %02x", raw[j]);
+		}
+		printf("\n");
+	}
+	printf("==================================\n");
+}
+
 /* Feature 2: place the communication matrix into QP 0's pre-registered
  * send buffer (the one sge_list[0].addr already points at) and post it as
  * a single WR on QP 0. We deliberately avoid IBV_SEND_INLINE because
@@ -910,10 +991,14 @@ static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
 	ctx->sge_list[0].length = user_param->size;
 	ctx->wr[0].send_flags |= IBV_SEND_SIGNALED;
 
+	deep_dump_wr_and_matrix("pre-post_send", ctx, user_param);
+
 	if (post_send_method(ctx, 0, user_param)) {
 		fprintf(stderr, "Deep mode: failed to post communication matrix on QP 0\n");
 		return FAILURE;
 	}
+
+	deep_dump_wr_and_matrix("post-post_send", ctx, user_param);
 
 	return SUCCESS;
 }
