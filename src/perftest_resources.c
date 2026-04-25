@@ -5411,12 +5411,17 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 
 	duration_param=user_param;
 
-	pthread_t print_thread;
-	if (pthread_create(&print_thread, NULL, &handle_signal_print_thread,(void*)&user_param->duration) != 0){
-		printf("Fail to create thread \n");
-		free(wc);
-		free(scnt_for_qp);
-		return FAILURE;
+	/* Deep mode only sleeps after the one-shot matrix send; periodic BW
+	 * reports from handle_signal_print_thread are meaningless and the
+	 * extra thread is unnecessary. */
+	if (!user_param->deep) {
+		pthread_t print_thread;
+		if (pthread_create(&print_thread, NULL, &handle_signal_print_thread,(void*)&user_param->duration) != 0){
+			printf("Fail to create thread \n");
+			free(wc);
+			free(scnt_for_qp);
+			return FAILURE;
+		}
 	}
 
 	if (!user_param->duplex && !has_recv_comp(user_param->verb)) {
@@ -5638,12 +5643,14 @@ int run_iter_bw_infinitely_server(struct pingpong_context *ctx, struct perftest_
 		posted_per_qp[i] = ctx->rposted;
 
 	duration_param=user_param;
-	pthread_t print_thread;
-	if (pthread_create(&print_thread, NULL, &handle_signal_print_thread, (void *)&user_param->duration) != 0)
-	{
-		printf("Fail to create thread \n");
-		return_value = FAILURE;
-		goto cleaning;
+	if (!user_param->deep) {
+		pthread_t print_thread;
+		if (pthread_create(&print_thread, NULL, &handle_signal_print_thread, (void *)&user_param->duration) != 0)
+		{
+			printf("Fail to create thread \n");
+			return_value = FAILURE;
+			goto cleaning;
+		}
 	}
 
 	user_param->iters = 0;
