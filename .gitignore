@@ -35,6 +35,14 @@ stamp-h1
 .cproject
 .project
 
+# Editor / IDE
+.vscode/
+.idea/
+
+# Local tooling / notes (not part of the upstream project)
+tools/
+文件修改要求.md
+
 #Ctags
 tags
 

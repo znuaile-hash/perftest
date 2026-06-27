@@ -962,9 +962,14 @@ static void deep_dump_wr_and_matrix(const char *tag,
  * a single WR on QP 0. We deliberately avoid IBV_SEND_INLINE because
  * inline capacity is HCA-dependent and often smaller than the packed
  * payload. See the long comment above init_comm_matrix() for the full
- * analysis / trade-off. */
+ * analysis / trade-off.
+ *
+ * New feature 1: this is called once per iteration of the DEEP_POST_LOOP
+ * loop. The verbose wire dump is emitted only once (by the caller, before
+ * the loop); here we print a single terse line that also reports which
+ * iteration this is (iter is 0-based, loop is the total). */
 static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
-		struct perftest_parameters *user_param)
+		struct perftest_parameters *user_param, int iter, int loop)
 {
 	const size_t payload_bytes = sizeof(ctx->comm_matrix);
 	struct ibv_send_wr *wr = &ctx->wr[0];
@@ -991,14 +996,105 @@ static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
 	ctx->sge_list[0].length = user_param->size;
 	ctx->wr[0].send_flags |= IBV_SEND_SIGNALED;
 
-	deep_dump_wr_and_matrix("pre-post_send", ctx, user_param);
+	/* New feature 1: simplified pre-post print carrying the iteration. */
+	printf("  [deep] post_send #%d/%d (pre):  va=0x%016lx rkey=0x%08x len=%u\n",
+		iter + 1, loop,
+		(unsigned long)be64toh(ctx->comm_matrix.matrix.va),
+		(unsigned)be32toh(ctx->comm_matrix.matrix.rkey),
+		(unsigned)ctx->sge_list[0].length);
 
 	if (post_send_method(ctx, 0, user_param)) {
-		fprintf(stderr, "Deep mode: failed to post communication matrix on QP 0\n");
+		fprintf(stderr, "Deep mode: failed to post communication matrix on QP 0 (iter %d)\n",
+			iter + 1);
 		return FAILURE;
 	}
 
-	deep_dump_wr_and_matrix("post-post_send", ctx, user_param);
+	/* New feature 1: simplified post-post print carrying the iteration. */
+	printf("  [deep] post_send #%d/%d (post): submitted\n", iter + 1, loop);
+
+	return SUCCESS;
+}
+
+/* New feature: drive the deep-mode one-to-many announcement as a measured
+ * burst. QP 0 posts the communication matrix loop times, where loop is
+ * user_param->batch_size (the --batchsize option, default DEEP_POST_LOOP);
+ * the HCA / firmware fans each post out to the qp_num-1 peer experts, so we
+ * expect loop*(qp_num-1) completions on the send CQ. We bracket the burst
+ * with two wall-clock timestamps and report the elapsed time.
+ *
+ *   1. loop = batch_size posts, simplified per-iteration prints  (feature 1/6)
+ *   2. record system time right before the first post            (feature 2)
+ *   3. drain exactly loop*(qp_num-1) CQEs                         (feature 3)
+ *   4. record system time once the expected CQE count is reached (feature 4)
+ *   5. print both timestamps and their difference                (feature 5)
+ */
+static int deep_send_loop_and_measure(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param)
+{
+	const int loop = user_param->batch_size;
+	const int qp_num = user_param->num_of_qps;
+	const long expected_cqe = (long)loop * (long)(qp_num - 1);
+	struct timeval t_start, t_end;
+	long got_cqe = 0;
+	int iter;
+
+	/* Emit the full wire dump exactly once (the per-iteration prints are
+	 * intentionally terse). Refresh va/rkey first so the dump is accurate. */
+	deep_update_comm_matrix_from_wr(ctx, user_param, &ctx->wr[0]);
+	deep_dump_wr_and_matrix("deep-loop-first", ctx, user_param);
+
+	printf("  [deep] starting %d post_send iterations, expecting %ld CQE "
+		"(loop*(qp_num-1), qp_num=%d)\n",
+		loop, expected_cqe, qp_num);
+
+	/* Step 2: system time immediately before the first post. */
+	gettimeofday(&t_start, NULL);
+
+	for (iter = 0; iter < loop; iter++) {
+		if (deep_send_comm_matrix_packet(ctx, user_param, iter, loop))
+			return FAILURE;
+	}
+
+	/* Step 3: count completions until we reach loop*(qp_num-1). */
+	while (got_cqe < expected_cqe) {
+		struct ibv_wc wc[16];
+		int ne = ibv_poll_cq(ctx->send_cq, 16, wc);
+		int k;
+
+		if (ne < 0) {
+			fprintf(stderr, "Deep mode: ibv_poll_cq failed (ne=%d)\n", ne);
+			return FAILURE;
+		}
+		for (k = 0; k < ne; k++) {
+			if (wc[k].status != IBV_WC_SUCCESS) {
+				fprintf(stderr,
+					"Deep mode: CQE error status=%d (%s) wr_id=0x%lx\n",
+					wc[k].status, ibv_wc_status_str(wc[k].status),
+					(unsigned long)wc[k].wr_id);
+				return FAILURE;
+			}
+		}
+		got_cqe += ne;
+	}
+
+	/* Step 4: system time once the expected CQE count is reached. */
+	gettimeofday(&t_end, NULL);
+
+	printf("  [deep] received %ld CQE (expected %ld)\n", got_cqe, expected_cqe);
+
+	/* Step 5: report both timestamps and the elapsed delta. */
+	{
+		double start_s = (double)t_start.tv_sec + (double)t_start.tv_usec / 1e6;
+		double end_s   = (double)t_end.tv_sec   + (double)t_end.tv_usec   / 1e6;
+		double diff_us = (end_s - start_s) * 1e6;
+
+		printf("  [deep] t_start (step2) = %ld.%06ld s\n",
+			(long)t_start.tv_sec, (long)t_start.tv_usec);
+		printf("  [deep] t_end   (step4) = %ld.%06ld s\n",
+			(long)t_end.tv_sec, (long)t_end.tv_usec);
+		printf("  [deep] elapsed (step4-step2) = %.3f us (%.3f ms)\n",
+			diff_us, diff_us / 1000.0);
+	}
 
 	return SUCCESS;
 }
@@ -4619,26 +4715,11 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 			goto cleaning;
 		}
 
-		if (deep_send_comm_matrix_packet(ctx, user_param)) {
+		/* New feature: post the matrix DEEP_POST_LOOP times, then wait
+		 * for loop*(qp_num-1) completions and report the elapsed time. */
+		if (deep_send_loop_and_measure(ctx, user_param)) {
 			return_value = FAILURE;
 			goto cleaning;
-		}
-		printf("  Deep mode: QP 0 sent communication payload (%lu bytes)\n",
-			(unsigned long)sizeof(ctx->comm_matrix));
-
-		{
-			struct ibv_wc drain_wc;
-			int drain_ne = 0;
-			while (drain_ne == 0) {
-				drain_ne = ibv_poll_cq(ctx->send_cq, 1, &drain_wc);
-			}
-			if (drain_ne < 0 || drain_wc.status != IBV_WC_SUCCESS) {
-				fprintf(stderr,
-					"Deep mode: matrix WC status=%d (ne=%d)\n",
-					drain_wc.status, drain_ne);
-				return_value = FAILURE;
-				goto cleaning;
-			}
 		}
 
 		printf("  Deep mode: waiting silently after matrix send.\n");
@@ -5448,27 +5529,12 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 			return_value = FAILURE;
 			goto cleaning;
 		}
-		err = deep_send_comm_matrix_packet(ctx, user_param);
-		if (err) {
+
+		/* New feature: post the matrix DEEP_POST_LOOP times, then wait
+		 * for loop*(qp_num-1) completions and report the elapsed time. */
+		if (deep_send_loop_and_measure(ctx, user_param)) {
 			return_value = FAILURE;
 			goto cleaning;
-		}
-		printf("  Deep mode: QP 0 sent communication payload (%lu bytes)\n",
-			(unsigned long)sizeof(ctx->comm_matrix));
-
-		{
-			struct ibv_wc drain_wc;
-			int drain_ne = 0;
-			while (drain_ne == 0) {
-				drain_ne = ibv_poll_cq(ctx->send_cq, 1, &drain_wc);
-			}
-			if (drain_ne < 0 || drain_wc.status != IBV_WC_SUCCESS) {
-				fprintf(stderr,
-					"Deep mode: matrix WC status=%d (ne=%d)\n",
-					drain_wc.status, drain_ne);
-				return_value = FAILURE;
-				goto cleaning;
-			}
 		}
 
 		printf("  Deep mode: waiting silently after matrix send.\n");

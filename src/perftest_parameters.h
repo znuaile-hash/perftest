@@ -109,6 +109,8 @@
 #define DEF_SL	      (0)
 #define DEF_GID_INDEX (-1)
 #define DEF_NUM_QPS   (1)
+/* Deep mode: default number of QP 0 post_send iterations (--batchsize). */
+#define DEEP_POST_LOOP   (128)
 #define DEF_RX_RDMA   (1)
 #define DEF_RX_SEND   (512)
 #define DEF_CQ_MOD    (100)
@@ -707,6 +709,7 @@ struct perftest_parameters {
 	enum validation_mode		validation_mode;
 	int expid;
 	int deep;
+	int batch_size; /* deep mode: number of QP 0 post_send iterations (--batchsize) */
 };
 
 struct report_options {

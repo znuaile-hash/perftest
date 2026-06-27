@@ -777,6 +777,17 @@ static void usage(const char *argv0, VerbType verb, TestType tst, int connection
 		printf(" Use send-with-immediate verb instead of send\n");
 	}
 
+	printf("\n Deep mode (one-to-many):\n");
+	printf("      --deep ");
+	printf(" Enable deep (one-to-many) mode: QP 0 announces a communication matrix to the peer experts.\n");
+
+	printf("      --expid=<expbase> (alias: --exp) ");
+	printf(" Base experiment id passed to QP creation; each QP gets expid=expbase+qp_index (default 0, must be non-negative).\n");
+
+	printf("      --batchsize=<count> ");
+	printf(" Deep mode: number of QP 0 post_send iterations in the measured burst (default %d, must be positive).\n",
+		DEEP_POST_LOOP);
+
 	putchar('\n');
 }
 /******************************************************************************
@@ -977,6 +988,7 @@ static void init_perftest_params(struct perftest_parameters *user_param)
 	user_param->print_eth_func 	= &print_ethernet_header;
 	user_param->deep		= 0;
 	user_param->expid		= 0;
+	user_param->batch_size		= DEEP_POST_LOOP;
 
 	if (user_param->tst == LAT) {
 		user_param->r_flag->unsorted	= OFF;
@@ -2856,6 +2868,7 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 	#endif
 	static int exp_flag = 0;
 	static int deep_flag = 0;
+	static int batchsize_flag = 0;
 	static int connectionless_flag = 0;
 	static int cqe_poll_flag = 0;
 	static int disable_dynamic_polling_flag = 0;
@@ -3063,6 +3076,7 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 			{.name = "exp", .has_arg = 1, .flag = &exp_flag, .val = 1 },
 			{.name = "expid", .has_arg = 1, .flag = &exp_flag, .val = 1 },
 			{.name = "deep", .has_arg = 0, .flag = &deep_flag, .val = 1 },
+			{.name = "batchsize", .has_arg = 1, .flag = &batchsize_flag, .val = 1 },
 			{.name = "data_validation", .has_arg = 0, .flag = &data_validation_flag, .val = 1 },
 			{.name = "data_validation_debug", .has_arg = 0, .flag = &data_validation_debug_flag, .val = 1 },
 			{0}
@@ -3887,6 +3901,11 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 				if (deep_flag) {
 					user_param->deep = 1;
 					deep_flag = 0;
+				}
+
+				if (batchsize_flag) {
+					CHECK_VALUE_POSITIVE(user_param->batch_size, int, "Batch size", not_int_ptr);
+					batchsize_flag = 0;
 				}
 				break;
 			default:
