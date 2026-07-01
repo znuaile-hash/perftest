@@ -705,6 +705,7 @@ struct perftest_parameters {
 	int				validation_chunks_per_qp; /* Dynamic buffer depth */
 	uint32_t			validation_chunk_size;    /* Operations per validation chunk (may differ from tx_depth) */
 	enum validation_mode		validation_mode;
+	int batch_size; /* --batchsize: packets per QP for the timed batch send (0 = disabled) */
 };
 
 struct report_options {

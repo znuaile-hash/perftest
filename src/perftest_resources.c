@@ -4305,6 +4305,129 @@ cleaning:
 }
 
 /******************************************************************************
+ * --batchsize feature (basic_test):
+ *
+ * Send exactly user_param->batch_size packets on every QP as a single timed
+ * burst, then report the wall-clock time around it:
+ *   1. record system time t1 right before the first post_send;
+ *   2. post batch_size packets per QP (flow-controlled by tx_depth) and reap
+ *      every completion, checking each CQE status;
+ *   3. once all packets are sent and all CQEs are received successfully,
+ *      record system time t2;
+ *   4. print t1, t2 and (t2 - t1).
+ *
+ * Note: this path assumes the default --post_list 1 (one WR per post). If a
+ * larger post_list is requested we warn, because the per-packet accounting
+ * below counts one completion per post.
+ ******************************************************************************/
+static int run_batch_and_measure(struct pingpong_context *ctx,
+		struct perftest_parameters *user_param)
+{
+	int			num_of_qps = user_param->num_of_qps;
+	const uint64_t		per_qp = (uint64_t)user_param->batch_size;
+	uint64_t		total;
+	uint64_t		totscnt = 0, totccnt = 0;
+	uint64_t		*scnt = NULL, *ccnt = NULL;
+	struct ibv_wc		*wc = NULL;
+	const int		wc_depth = 128;
+	int			index, i, ne;
+	int			return_value = SUCCESS;
+	struct timeval		t1, t2;
+	double			dt_us;
+
+	if (user_param->duplex && (user_param->use_xrc || user_param->connection_type == DC))
+		num_of_qps /= 2;
+	if (num_of_qps < 1)
+		num_of_qps = 1;
+
+	if (user_param->post_list != 1) {
+		fprintf(stderr, " --batchsize assumes --post_list 1; got %d, "
+			"packet accounting may be off\n", user_param->post_list);
+	}
+
+	total = per_qp * (uint64_t)num_of_qps;
+
+	#ifdef HAVE_IBV_WR_API
+	if (user_param->connection_type != RawEth)
+		ctx_post_send_work_request_func_pointer(ctx, user_param);
+	#endif
+
+	ALLOCATE(wc, struct ibv_wc, wc_depth);
+	ALLOCATE(scnt, uint64_t, num_of_qps);
+	ALLOCATE(ccnt, uint64_t, num_of_qps);
+	memset(scnt, 0, sizeof(uint64_t) * num_of_qps);
+	memset(ccnt, 0, sizeof(uint64_t) * num_of_qps);
+
+	/* Every posted WR must signal so we can count exactly one CQE per packet. */
+	for (index = 0; index < num_of_qps; index++)
+		ctx->wr[index].send_flags |= IBV_SEND_SIGNALED;
+
+	printf(" --batchsize: sending %lu packets/QP x %d QP = %lu packets\n",
+		(unsigned long)per_qp, num_of_qps, (unsigned long)total);
+
+	/* Step 2: system time immediately before the first post_send. */
+	gettimeofday(&t1, NULL);
+
+	while (totccnt < total) {
+		/* Post phase: keep each QP's send queue filled up to tx_depth. */
+		for (index = 0; index < num_of_qps; index++) {
+			while (scnt[index] < per_qp &&
+			       (scnt[index] - ccnt[index]) < (uint64_t)user_param->tx_depth) {
+				if (post_send_method(ctx, index, user_param)) {
+					fprintf(stderr, "Couldn't post send: qp %d scnt=%lu\n",
+						index, (unsigned long)scnt[index]);
+					return_value = FAILURE;
+					goto cleaning;
+				}
+				scnt[index]++;
+				totscnt++;
+			}
+		}
+
+		/* Completion phase. */
+		ne = ibv_poll_cq(ctx->send_cq, wc_depth, wc);
+		if (ne < 0) {
+			fprintf(stderr, "poll CQ failed %d\n", ne);
+			return_value = FAILURE;
+			goto cleaning;
+		}
+		for (i = 0; i < ne; i++) {
+			int qp_index;
+			if (wc[i].status != IBV_WC_SUCCESS) {
+				fprintf(stderr, "Completion with error: status=%s (%d) wr_id=0x%lx\n",
+					ibv_wc_status_str(wc[i].status), wc[i].status,
+					(unsigned long)wc[i].wr_id);
+				return_value = FAILURE;
+				goto cleaning;
+			}
+			qp_index = (int)get_wr_id_qp_index(wc[i].wr_id);
+			if (qp_index >= 0 && qp_index < num_of_qps)
+				ccnt[qp_index]++;
+			totccnt++;
+		}
+	}
+
+	/* Step 3: all packets sent and all CQEs reaped successfully. */
+	gettimeofday(&t2, NULL);
+
+	dt_us = (double)(t2.tv_sec - t1.tv_sec) * 1e6 +
+		(double)(t2.tv_usec - t1.tv_usec);
+
+	/* Step 4: print t1, t2 and the difference. */
+	printf(" --batchsize done: %lu CQE received (expected %lu)\n",
+		(unsigned long)totccnt, (unsigned long)total);
+	printf("   t1        = %ld.%06ld s\n", (long)t1.tv_sec, (long)t1.tv_usec);
+	printf("   t2        = %ld.%06ld s\n", (long)t2.tv_sec, (long)t2.tv_usec);
+	printf("   t2 - t1   = %.3f us (%.3f ms)\n", dt_us, dt_us / 1000.0);
+
+cleaning:
+	free(ccnt);
+	free(scnt);
+	free(wc);
+	return return_value;
+}
+
+/******************************************************************************
  *
  ******************************************************************************/
 int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_param)
@@ -4333,6 +4456,10 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 	uintptr_t		primary_send_addr = ctx->sge_list[0].addr;
 	int			address_offset = 0;
 	int			flows_burst_iter = 0;
+
+	/* --batchsize: run the dedicated timed batch send and return. */
+	if (user_param->batch_size > 0)
+		return run_batch_and_measure(ctx, user_param);
 
 	struct dyn_poll_ctx *dyn_ctx = init_dyn_poll_ctx(user_param);
 	if (!dyn_ctx) {

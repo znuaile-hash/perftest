@@ -777,6 +777,9 @@ static void usage(const char *argv0, VerbType verb, TestType tst, int connection
 		printf(" Use send-with-immediate verb instead of send\n");
 	}
 
+	printf("      --batchsize=<count> ");
+	printf(" Send <count> packets per QP in a single timed batch, then print t1/t2/(t2-t1) around the burst (positive integer)\n");
+
 	putchar('\n');
 }
 /******************************************************************************
@@ -892,6 +895,7 @@ static void init_perftest_params(struct perftest_parameters *user_param)
 	user_param->eq_num		= 0;
 	user_param->use_eq_num		= OFF;
 	user_param->num_of_qps		= DEF_NUM_QPS;
+	user_param->batch_size		= 0;
 	user_param->gid_index		= DEF_GID_INDEX;
 	user_param->gid_index2		= DEF_GID_INDEX;
 	user_param->use_gid_user	= 0;
@@ -2867,6 +2871,7 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 
 	static int data_validation_flag = 0;
 	static int data_validation_debug_flag = 0;
+	static int batchsize_flag = 0;
 
 	char *server_ip = NULL;
 	char *client_ip = NULL;
@@ -3058,6 +3063,7 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 			#endif
 			{.name = "data_validation", .has_arg = 0, .flag = &data_validation_flag, .val = 1 },
 			{.name = "data_validation_debug", .has_arg = 0, .flag = &data_validation_debug_flag, .val = 1 },
+			{.name = "batchsize", .has_arg = 1, .flag = &batchsize_flag, .val = 1 },
 			{0}
 		};
 		if (!duplicates_checker) {
@@ -3356,6 +3362,10 @@ int parser(struct perftest_parameters *user_param,char *argv[], int argc)
 				if (pkey_flag) {
 					CHECK_VALUE(user_param->pkey_index,int,"Pkey index",not_int_ptr);
 					pkey_flag = 0;
+				}
+				if (batchsize_flag) {
+					CHECK_VALUE_POSITIVE(user_param->batch_size,int,"Batch size",not_int_ptr);
+					batchsize_flag = 0;
 				}
 				if (rate_limit_flag) {
 					GET_STRING(user_param->rate_limit_str ,strdupa(optarg));
