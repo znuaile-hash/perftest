@@ -5247,6 +5247,10 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 	int			address_offset = 0;
 	int			flows_burst_iter = 0;
 
+	/* --batchsize: run the dedicated timed batch send and return. */
+	if (user_param->batch_size > 0)
+		return run_batch_and_measure(ctx, user_param);
+
 	#ifdef HAVE_IBV_WR_API
 	if (user_param->connection_type != RawEth)
 		ctx_post_send_work_request_func_pointer(ctx, user_param);
