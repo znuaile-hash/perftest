@@ -42,6 +42,7 @@ stamp-h1
 # Local tooling / notes (not part of the upstream project)
 tools/
 文件修改要求.md
+basic_test.md
 
 #Ctags
 tags
