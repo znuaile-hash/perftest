@@ -1003,6 +1003,25 @@ static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
 		(unsigned)be32toh(ctx->comm_matrix.matrix.rkey),
 		(unsigned)ctx->sge_list[0].length);
 
+	/* Dump the first 64 bytes of the buffer the WR's SGE points to (the
+	 * on-wire packet header), 4 bytes per group, before posting. */
+	{
+		const unsigned char *buf =
+			(const unsigned char *)(uintptr_t)ctx->sge_list[0].addr;
+		int b;
+
+		printf("  [deep] post_send #%d/%d buff header (64B, 4B/group):\n",
+			iter + 1, loop);
+		for (b = 0; b < 64; b += 4) {
+			if (b % 16 == 0)
+				printf("    +0x%02x:", b);
+			printf(" %02x%02x%02x%02x",
+				buf[b], buf[b + 1], buf[b + 2], buf[b + 3]);
+			if ((b + 4) % 16 == 0)
+				printf("\n");
+		}
+	}
+
 	if (post_send_method(ctx, 0, user_param)) {
 		fprintf(stderr, "Deep mode: failed to post communication matrix on QP 0 (iter %d)\n",
 			iter + 1);
@@ -4704,10 +4723,9 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 		user_param->tposted[0] = get_cycles();
 
 	/* In deep (one-to-many) mode, QP 0 sends one packet carrying the
-	 * communication matrix and then the process silently waits - no
-	 * business traffic is driven on any QP. We drain the single
-	 * SIGNALED completion so it does not pollute any later CQ poll,
-	 * then loop on sleep() to keep the connections / QPs alive. */
+	 * communication matrix. We post the burst, wait for its completions
+	 * inside deep_send_loop_and_measure(), then return immediately - no
+	 * further business traffic is driven and no unbounded wait is done. */
 	if (user_param->deep) {
 		if (init_comm_matrix(ctx, user_param)) {
 			fprintf(stderr, "Deep mode: failed to initialize communication matrix\n");
@@ -4722,11 +4740,8 @@ int run_iter_bw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 			goto cleaning;
 		}
 
-		printf("  Deep mode: waiting silently after matrix send.\n");
-		while (1) {
-			sleep(1);
-		}
-		/* unreachable */
+		printf("  Deep mode: matrix send complete, finishing.\n");
+		goto cleaning;
 	}
 
 	/* If using rate limiter, calculate gap time between bursts */
@@ -5492,9 +5507,9 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 
 	duration_param=user_param;
 
-	/* Deep mode only sleeps after the one-shot matrix send; periodic BW
-	 * reports from handle_signal_print_thread are meaningless and the
-	 * extra thread is unnecessary. */
+	/* Deep mode only performs the one-shot matrix send and then returns;
+	 * periodic BW reports from handle_signal_print_thread are meaningless
+	 * and the extra thread is unnecessary. */
 	if (!user_param->deep) {
 		pthread_t print_thread;
 		if (pthread_create(&print_thread, NULL, &handle_signal_print_thread,(void*)&user_param->duration) != 0){
@@ -5519,10 +5534,10 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 	user_param->tposted[0] = get_cycles();
 
 	/* In deep mode, QP 0 sends one packet carrying the communication
-	 * matrix (one-shot announcement) and then the process silently
-	 * waits - no business traffic is driven. The drain below picks up
-	 * the single SIGNALED completion so it does not pollute any later
-	 * CQ poll. */
+	 * matrix (one-shot announcement). We post the burst, wait for its
+	 * completions inside deep_send_loop_and_measure(), then return
+	 * immediately - no business traffic is driven and no unbounded wait
+	 * is done. */
 	if (user_param->deep) {
 		if (init_comm_matrix(ctx, user_param)) {
 			fprintf(stderr, "Deep mode: failed to initialize communication matrix\n");
@@ -5537,18 +5552,12 @@ int run_iter_bw_infinitely(struct pingpong_context *ctx,struct perftest_paramete
 			goto cleaning;
 		}
 
-		printf("  Deep mode: waiting silently after matrix send.\n");
+		printf("  Deep mode: matrix send complete, finishing.\n");
+		goto cleaning;
 	}
 
 	/* main loop for posting */
 	while (1) {
-		if (user_param->deep) {
-			/* Silent wait: keep the process (and thereby the
-			 * connections / QP 0) alive forever; no further WRs
-			 * are posted. */
-			sleep(1);
-			continue;
-		}
 
 	/* main loop to run over all the qps and post each time n messages */
 		for (index = 0 ; index < num_of_qps ; index++) {
