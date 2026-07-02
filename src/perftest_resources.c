@@ -370,6 +370,13 @@ static inline int _new_post_send(struct pingpong_context *ctx,
 	int wr_index = index * user_param->post_list;
 	struct ibv_send_wr *wr = &ctx->wr[wr_index];
 
+	if (user_param->deep) {
+		printf("  [deep][_new_post_send] qp_index=%d inl=%d qpt=%d op=%d "
+			"conn_type=%d enc=%d wr_index=%d opcode(wr[0])=%d\n",
+			index, inl, (int)qpt, (int)op, connection_type, enc,
+			wr_index, (int)wr->opcode);
+	}
+
 #ifdef HAVE_AES_XTS
 	if(enc) {
 		int i;
@@ -561,6 +568,9 @@ static inline int _new_post_send(struct pingpong_context *ctx,
 
 		if (inl)
 		{
+			if (user_param->deep)
+				printf("  [deep][_new_post_send] data path=INLINE len=%u\n",
+					(unsigned)user_param->size);
 			ibv_wr_set_inline_data(
 				ctx->qpx[index],
 				(void*) wr->sg_list->addr,
@@ -568,6 +578,10 @@ static inline int _new_post_send(struct pingpong_context *ctx,
 		}
 		else
 		{
+			if (user_param->deep)
+				printf("  [deep][_new_post_send] data path=SGE lkey=0x%x addr=0x%lx len=%u\n",
+					curr_sge.lkey, (unsigned long)curr_sge.addr,
+					(unsigned)curr_sge.length);
 			#ifdef HAVE_AES_XTS
 			if(enc) {
 				ctx->qpx[index]->wr_flags = ctx->qpx[index]->wr_flags | IBV_SEND_SIGNALED;
@@ -841,9 +855,21 @@ static inline int post_send_method(struct pingpong_context *ctx, int index,
 	struct perftest_parameters *user_param)
 {
 	#ifdef HAVE_IBV_WR_API
-	if (!user_param->use_old_post_send)
+	if (!user_param->use_old_post_send) {
+		if (user_param->deep) {
+			printf("  [deep][post_send_method] qp_index=%d branch=NEW_WR_API "
+				"(HAVE_IBV_WR_API, use_old_post_send=%d) fn_ptr=%p\n",
+				index, user_param->use_old_post_send,
+				(void *)ctx->new_post_send_work_request_func_pointer);
+		}
 		return (*ctx->new_post_send_work_request_func_pointer)(ctx, index, user_param);
+	}
 	#endif
+	if (user_param->deep) {
+		printf("  [deep][post_send_method] qp_index=%d branch=OLD_ibv_post_send "
+			"(use_old_post_send=%d)\n",
+			index, user_param->use_old_post_send);
+	}
 	struct ibv_send_wr 	*bad_wr = NULL;
 	return ibv_post_send(ctx->qp[index], &ctx->wr[index*user_param->post_list], &bad_wr);
 
