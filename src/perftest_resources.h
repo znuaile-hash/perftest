@@ -123,7 +123,7 @@ struct deep_comm_matrix {
 	uint8_t exp_num;
 	uint8_t tid;
 	uint8_t exp[DEEP_MAX_EXP_ENTRIES];
-	uint32_t rsvd;
+	uint32_t data_len;
 	uint64_t va;
 	uint32_t rkey;
 } __attribute__((packed));

@@ -900,6 +900,10 @@ static void deep_update_comm_matrix_from_wr(struct pingpong_context *ctx,
 
 	ctx->comm_matrix.matrix.va   = htobe64(va_host);
 	ctx->comm_matrix.matrix.rkey = htobe32(rkey_host);
+	/* 修改要求a.2: 赋值完 va/rkey 后，把发送的数据长度写入 data_len。
+	 * 长度取 -s 指定的 buffer 大小（功能5：WR 数据长度 = -s），
+	 * 与 va/rkey 一样按大端存放，peer 用 be32toh 读取。 */
+	ctx->comm_matrix.matrix.data_len = htobe32((uint32_t)user_param->size);
 }
 
 /* Dump QP 0's outgoing WR and the staged communication matrix. Called
@@ -952,12 +956,13 @@ static void deep_dump_wr_and_matrix(const char *tag,
 		m->eth_hdr.smac[3], m->eth_hdr.smac[4], m->eth_hdr.smac[5],
 		(unsigned)m->eth_hdr.ethdeeptype,
 		(unsigned)ntohs(m->eth_hdr.ethdeeptype));
-	printf("  Matrix.body: exp_num=%u tid=%u rsvd=%u "
+	printf("  Matrix.body: exp_num=%u tid=%u data_len_wire=0x%08x (host=%u) "
 		"va_wire=0x%016lx (host=0x%016lx) "
 		"rkey_wire=0x%08x (host=0x%08x)\n",
 		(unsigned)m->matrix.exp_num,
 		(unsigned)m->matrix.tid,
-		(unsigned)m->matrix.rsvd,
+		(unsigned)m->matrix.data_len,
+		(unsigned)be32toh(m->matrix.data_len),
 		(unsigned long)m->matrix.va,
 		(unsigned long)be64toh(m->matrix.va),
 		(unsigned)m->matrix.rkey,
@@ -7500,7 +7505,7 @@ int error_handler(char *error_message)
  *           uint8_t  exp_num;         // #filled entries in exp[]
  *           uint8_t  tid;
  *           uint8_t  exp[10];         // qp_expid of QPs 1..N-1, clamped
- *           uint32_t rsvd;
+ *           uint32_t data_len;        // send data length (-s), big-endian on the wire
  *           uint64_t va;              // refreshed from WR at send time, big-endian on the wire
  *           uint32_t rkey;            // refreshed from WR at send time, big-endian on the wire
  *       } matrix;
@@ -7594,7 +7599,7 @@ int init_comm_matrix(struct pingpong_context *ctx,
 	 * set exp_num to the clamped value rather than the raw (num_qps - 1). */
 	ctx->comm_matrix.matrix.exp_num = (uint8_t)(exp_entries & 0xff);
 	ctx->comm_matrix.matrix.tid     = 0;
-	ctx->comm_matrix.matrix.rsvd    = 0;
+	ctx->comm_matrix.matrix.data_len = 0;
 	ctx->comm_matrix.matrix.va      = 0;
 	ctx->comm_matrix.matrix.rkey    = 0;
 	ctx->comm_matrix_size = exp_entries;
