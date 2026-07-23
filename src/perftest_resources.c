@@ -4140,6 +4140,38 @@ static void ctx_post_send_work_request_func_pointer(struct pingpong_context *ctx
 }
 #endif
 
+/* 用可读的 ASCII pattern 填充发送 buffer，方便抓包时直接肉眼核对内容。
+ * 生成格式：先写一次前缀 "begin:"，随后循环拼接
+ *   "0123456789segment000;0123456789segment001;..."
+ * segment 编号 3 位循环递增（000~999），整体按 len 截断。
+ * 说明：使用普通 ASCII 的 ':' 和 ';'（需求里的全角 ：/； 按“普通英文字符”处理）。*/
+static void fill_buffer_ascii_pattern(char *buf, uint64_t len)
+{
+	const char *prefix = "begin:";
+	uint64_t off = 0;
+	unsigned seg = 0;
+	size_t plen;
+
+	if (!buf || len == 0)
+		return;
+
+	plen = strlen(prefix);
+	if (plen > len)
+		plen = len;
+	memcpy(buf, prefix, plen);
+	off = plen;
+
+	while (off < len) {
+		char seg_str[32];
+		int n = snprintf(seg_str, sizeof(seg_str),
+				"0123456789segment%03u;", seg % 1000);
+		uint64_t copy = ((uint64_t)n <= (len - off)) ? (uint64_t)n : (len - off);
+		memcpy(buf + off, seg_str, copy);
+		off += copy;
+		seg++;
+	}
+}
+
 /******************************************************************************
  *
  ******************************************************************************/
@@ -4179,6 +4211,13 @@ void ctx_set_send_reg_wqes(struct pingpong_context *ctx,
 				ctx->sge_list[i*user_param->post_list].addr = (uintptr_t)ctx->buf[i];
 			}
 		}
+
+		/* WR 初始化时用可读 ASCII pattern 覆盖本 QP 的发送 buffer。
+		 * 覆盖长度取实际发送长度 user_param->size：该区间在所有模式
+		 * （含 mac_fwd / mr_per_qp）下都保证落在已注册 MR 内，避免越界。*/
+		fill_buffer_ascii_pattern(
+			(char *)(uintptr_t)ctx->sge_list[i*user_param->post_list].addr,
+			user_param->size);
 
 		if (user_param->verb == WRITE || user_param->verb == WRITE_IMM || user_param->verb == READ)
 			ctx->wr[i*user_param->post_list].wr.rdma.remote_addr   = rem_dest[dest_idx].vaddr;
