@@ -1124,6 +1124,10 @@ static int deep_send_loop_and_measure(struct pingpong_context *ctx,
 				return FAILURE;
 			}
 		}
+		/* 每次 ibv_poll_cq 取到 CQE 时，打印本次数量及累计/预期数量。 */
+		if (ne > 0)
+			printf("  [deep] ibv_poll_cq got %d CQE (total %ld/%ld)\n",
+				ne, got_cqe + ne, expected_cqe);
 		got_cqe += ne;
 	}
 
