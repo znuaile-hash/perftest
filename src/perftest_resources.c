@@ -1027,40 +1027,11 @@ static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
 	ctx->sge_list[0].length = user_param->size;
 	ctx->wr[0].send_flags |= IBV_SEND_SIGNALED;
 
-	/* New feature 1: simplified pre-post print carrying the iteration. */
-	printf("  [deep] post_send #%d/%d (pre):  va=0x%016lx rkey=0x%08x len=%u\n",
-		iter + 1, loop,
-		(unsigned long)be64toh(ctx->comm_matrix.matrix.va),
-		(unsigned)be32toh(ctx->comm_matrix.matrix.rkey),
-		(unsigned)ctx->sge_list[0].length);
-
-	/* Dump the first 64 bytes of the buffer the WR's SGE points to (the
-	 * on-wire packet header), 4 bytes per group, before posting. */
-	{
-		const unsigned char *buf =
-			(const unsigned char *)(uintptr_t)ctx->sge_list[0].addr;
-		int b;
-
-		printf("  [deep] post_send #%d/%d buff header (64B, 4B/group):\n",
-			iter + 1, loop);
-		for (b = 0; b < 64; b += 4) {
-			if (b % 16 == 0)
-				printf("    +0x%02x:", b);
-			printf(" %02x%02x%02x%02x",
-				buf[b], buf[b + 1], buf[b + 2], buf[b + 3]);
-			if ((b + 4) % 16 == 0)
-				printf("\n");
-		}
-	}
-
 	if (post_send_method(ctx, 0, user_param)) {
 		fprintf(stderr, "Deep mode: failed to post communication matrix on QP 0 (iter %d)\n",
 			iter + 1);
 		return FAILURE;
 	}
-
-	/* New feature 1: simplified post-post print carrying the iteration. */
-	printf("  [deep] post_send #%d/%d (post): submitted\n", iter + 1, loop);
 
 	return SUCCESS;
 }
@@ -1101,6 +1072,12 @@ static int deep_send_loop_and_measure(struct pingpong_context *ctx,
 	gettimeofday(&t_start, NULL);
 
 	for (iter = 0; iter < loop; iter++) {
+		/* 例行打印集中放在调用前：报告第几次发包及即将下发的 va/rkey/len。 */
+		printf("  [deep] post_send #%d/%d (pre): va=0x%016lx rkey=0x%08x len=%lu\n",
+			iter + 1, loop,
+			(unsigned long)be64toh(ctx->comm_matrix.matrix.va),
+			(unsigned)be32toh(ctx->comm_matrix.matrix.rkey),
+			(unsigned long)user_param->size);
 		if (deep_send_comm_matrix_packet(ctx, user_param, iter, loop))
 			return FAILURE;
 	}
