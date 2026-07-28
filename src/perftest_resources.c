@@ -1054,22 +1054,22 @@ static int deep_send_loop_and_measure(struct pingpong_context *ctx,
 	deep_dump_wr_and_matrix("deep-loop-first", ctx, user_param);
 
 	printf("  [deep] starting %d post_send iterations, expecting %ld CQE "
-		"(loop*(qp_num-1), qp_num=%d)\n",
-		loop, expected_cqe, qp_num);
+		"(loop*(qp_num-1), qp_num=%d); va=0x%016lx rkey=0x%08x len=%lu\n",
+		loop, expected_cqe, qp_num,
+		(unsigned long)be64toh(ctx->comm_matrix.matrix.va),
+		(unsigned)be32toh(ctx->comm_matrix.matrix.rkey),
+		(unsigned long)user_param->size);
 
 	/* Step 2: system time immediately before the first post. */
 	gettimeofday(&t_start, NULL);
 
 	for (iter = 0; iter < loop; iter++) {
-		/* 例行打印集中放在调用前：报告第几次发包及即将下发的 va/rkey/len。 */
-		printf("  [deep] post_send #%d/%d (pre): va=0x%016lx rkey=0x%08x len=%lu\n",
-			iter + 1, loop,
-			(unsigned long)be64toh(ctx->comm_matrix.matrix.va),
-			(unsigned)be32toh(ctx->comm_matrix.matrix.rkey),
-			(unsigned long)user_param->size);
 		if (deep_send_comm_matrix_packet(ctx, user_param, iter, loop))
 			return FAILURE;
 	}
+
+	printf("  [deep] all %d post_send submitted, waiting for %ld CQE ...\n",
+		loop, expected_cqe);
 
 	/* Step 3: count completions until we reach loop*(qp_num-1). */
 	while (got_cqe < expected_cqe) {
