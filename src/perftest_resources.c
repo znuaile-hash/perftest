@@ -1061,7 +1061,8 @@ static int deep_send_loop_and_measure(struct pingpong_context *ctx,
 		(unsigned long)be64toh(ctx->comm_matrix.matrix.va),
 		(unsigned)be32toh(ctx->comm_matrix.matrix.rkey),
 		(unsigned long)user_param->size);
-
+	printf("  [deep] all %d post_send submitted, waiting for %ld CQE ...\n",
+			loop, expected_cqe);
 	/* Step 2: system time immediately before the first post. */
 	gettimeofday(&t_start, NULL);
 
@@ -1070,8 +1071,6 @@ static int deep_send_loop_and_measure(struct pingpong_context *ctx,
 			return FAILURE;
 	}
 
-	printf("  [deep] all %d post_send submitted, waiting for %ld CQE ...\n",
-		loop, expected_cqe);
 
 	/* Step 3: count completions until we reach loop*(qp_num-1).
 	 * 每次最多取 16 个（wc 数组容量），但当 expected_cqe < 16 时只取
@@ -1095,10 +1094,6 @@ static int deep_send_loop_and_measure(struct pingpong_context *ctx,
 				return FAILURE;
 			}
 		}
-		/* 每次 ibv_poll_cq 取到 CQE 时，打印本次数量及累计/预期数量。 */
-		if (ne > 0)
-			printf("  [deep] ibv_poll_cq got %d CQE (total %ld/%ld)\n",
-				ne, got_cqe + ne, expected_cqe);
 		got_cqe += ne;
 	}
 
