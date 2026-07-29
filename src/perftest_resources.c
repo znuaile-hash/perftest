@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
 #include <sys/mman.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -991,10 +992,12 @@ static void deep_dump_wr_and_matrix(const char *tag,
  * the loop); here we print a single terse line that also reports which
  * iteration this is (iter is 0-based, loop is the total). */
 static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
-		struct perftest_parameters *user_param, int iter, int loop)
+		struct perftest_parameters *user_param, int iter, int loop,
+		long long *prep_ns)
 {
 	const size_t payload_bytes = sizeof(ctx->comm_matrix);
 	struct ibv_send_wr *wr = &ctx->wr[0];
+	struct timespec prep_t0, prep_t1;
 
 	if (payload_bytes > user_param->size) {
 		fprintf(stderr,
@@ -1002,6 +1005,10 @@ static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
 			(unsigned long)payload_bytes, (unsigned long)user_param->size);
 		return FAILURE;
 	}
+
+	/* 测量进入本函数后、调用 ibv_post_send 之前的 deep 准备开销
+	 * （通讯矩阵刷新 + buffer copy + SGE/flags 设置），累加到 prep_ns。 */
+	clock_gettime(CLOCK_MONOTONIC, &prep_t0);
 
 	/* Feature 1.4 / 1.2.3: refresh va/rkey from the outgoing WR so the
 	 * peer sees the actual remote address of the shared MR. Feature 4
@@ -1017,6 +1024,11 @@ static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
 	 * (zero-initialized on first use). */
 	ctx->sge_list[0].length = user_param->size;
 	ctx->wr[0].send_flags |= IBV_SEND_SIGNALED;
+
+	clock_gettime(CLOCK_MONOTONIC, &prep_t1);
+	if (prep_ns)
+		*prep_ns += (long long)(prep_t1.tv_sec - prep_t0.tv_sec) * 1000000000LL
+			+ (long long)(prep_t1.tv_nsec - prep_t0.tv_nsec);
 
 	if (post_send_method(ctx, 0, user_param)) {
 		fprintf(stderr, "Deep mode: failed to post communication matrix on QP 0 (iter %d)\n",
@@ -1066,10 +1078,18 @@ static int deep_send_loop_and_measure(struct pingpong_context *ctx,
 	/* Step 2: system time immediately before the first post. */
 	gettimeofday(&t_start, NULL);
 
+	long long prep_ns_total = 0;
 	for (iter = 0; iter < loop; iter++) {
-		if (deep_send_comm_matrix_packet(ctx, user_param, iter, loop))
+		if (deep_send_comm_matrix_packet(ctx, user_param, iter, loop,
+				&prep_ns_total))
 			return FAILURE;
 	}
+
+	/* 汇报进入 deep_send_comm_matrix_packet 到调用 ibv_post_send 之前
+	 * 这段 deep 准备操作（含 buffer copy）的累计/平均耗时。 */
+	printf("  [deep] pre-post prep: total %.3f us over %d iters, avg %.3f us/iter\n",
+		prep_ns_total / 1000.0, loop,
+		loop ? prep_ns_total / 1000.0 / loop : 0.0);
 
 
 	/* Step 3: count completions until we reach loop*(qp_num-1).
