@@ -997,7 +997,7 @@ static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
 {
 	const size_t payload_bytes = sizeof(ctx->comm_matrix);
 	struct ibv_send_wr *wr = &ctx->wr[0];
-	struct timespec prep_t0, prep_t1;
+	struct timeval prep_t0, prep_t1;
 
 	if (payload_bytes > user_param->size) {
 		fprintf(stderr,
@@ -1008,7 +1008,7 @@ static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
 
 	/* 测量进入本函数后、调用 ibv_post_send 之前的 deep 准备开销
 	 * （通讯矩阵刷新 + buffer copy + SGE/flags 设置），累加到 prep_ns。 */
-	clock_gettime(CLOCK_MONOTONIC, &prep_t0);
+	gettimeofday(&prep_t0, NULL);
 
 	/* Feature 1.4 / 1.2.3: refresh va/rkey from the outgoing WR so the
 	 * peer sees the actual remote address of the shared MR. Feature 4
@@ -1025,10 +1025,10 @@ static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
 	ctx->sge_list[0].length = user_param->size;
 	ctx->wr[0].send_flags |= IBV_SEND_SIGNALED;
 
-	clock_gettime(CLOCK_MONOTONIC, &prep_t1);
+	gettimeofday(&prep_t1, NULL);
 	if (prep_ns)
 		*prep_ns += (long long)(prep_t1.tv_sec - prep_t0.tv_sec) * 1000000000LL
-			+ (long long)(prep_t1.tv_nsec - prep_t0.tv_nsec);
+			+ (long long)(prep_t1.tv_usec - prep_t0.tv_usec) * 1000LL;
 
 	if (post_send_method(ctx, 0, user_param)) {
 		fprintf(stderr, "Deep mode: failed to post communication matrix on QP 0 (iter %d)\n",
