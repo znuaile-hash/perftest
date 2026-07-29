@@ -874,7 +874,7 @@ static inline int post_send_method(struct pingpong_context *ctx, int index,
  * hosts they are no-ops. */
 static void deep_update_comm_matrix_from_wr(struct pingpong_context *ctx,
 		struct perftest_parameters *user_param,
-		struct ibv_send_wr *wr)
+		struct ibv_send_wr *wr, int iter)
 {
 	uint64_t va_host = 0;
 	uint32_t rkey_host = 0;
@@ -893,6 +893,8 @@ static void deep_update_comm_matrix_from_wr(struct pingpong_context *ctx,
 	 * 长度取 -s 指定的 buffer 大小（功能5：WR 数据长度 = -s），
 	 * 与 va/rkey 一样按大端存放，peer 用 be32toh 读取。 */
 	ctx->comm_matrix.matrix.data_len = htobe32((uint32_t)user_param->size);
+	/* tid 赋值为当前发包序号 iter（单字节，超过 255 自动回绕）。 */
+	ctx->comm_matrix.matrix.tid = (uint8_t)iter;
 }
 
 /* Dump QP 0's outgoing WR and the staged communication matrix. Called
@@ -1007,7 +1009,7 @@ static int deep_send_comm_matrix_packet(struct pingpong_context *ctx,
 	 * of the remote MR. The helper also performs the host->big-endian
 	 * conversion so what the peer sees in the payload matches the wire
 	 * convention of the other multi-byte fields (ethdeeptype). */
-	deep_update_comm_matrix_from_wr(ctx, user_param, wr);
+	deep_update_comm_matrix_from_wr(ctx, user_param, wr, iter);
 	memcpy((void *)(uintptr_t)ctx->sge_list[0].addr, &ctx->comm_matrix, payload_bytes);
 
 	/* Feature 5: keep WR data length as the user-provided -s size; the
@@ -1050,7 +1052,7 @@ static int deep_send_loop_and_measure(struct pingpong_context *ctx,
 
 	/* Emit the full wire dump exactly once (the per-iteration prints are
 	 * intentionally terse). Refresh va/rkey first so the dump is accurate. */
-	deep_update_comm_matrix_from_wr(ctx, user_param, &ctx->wr[0]);
+	deep_update_comm_matrix_from_wr(ctx, user_param, &ctx->wr[0], 0);
 	deep_dump_wr_and_matrix("deep-loop-first", ctx, user_param);
 
 	printf("  [deep] starting %d post_send iterations, expecting %ld CQE "
