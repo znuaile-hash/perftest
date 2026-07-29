@@ -1073,10 +1073,13 @@ static int deep_send_loop_and_measure(struct pingpong_context *ctx,
 	printf("  [deep] all %d post_send submitted, waiting for %ld CQE ...\n",
 		loop, expected_cqe);
 
-	/* Step 3: count completions until we reach loop*(qp_num-1). */
+	/* Step 3: count completions until we reach loop*(qp_num-1).
+	 * 每次最多取 16 个（wc 数组容量），但当 expected_cqe < 16 时只取
+	 * expected_cqe 个，避免请求超过预期数量。 */
+	int poll_cnt = (expected_cqe < 16) ? (int)expected_cqe : 16;
 	while (got_cqe < expected_cqe) {
 		struct ibv_wc wc[16];
-		int ne = ibv_poll_cq(ctx->send_cq, 16, wc);
+		int ne = ibv_poll_cq(ctx->send_cq, poll_cnt, wc);
 		int k;
 
 		if (ne < 0) {
